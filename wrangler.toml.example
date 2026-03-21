@@ -1,0 +1,12 @@
+# wrangler.toml 示例配置
+# 复制此文件为 wrangler.toml，替换项目相关变量后使用
+# 部署命令：npx wrangler deploy
+
+name = "wf-cn-{project}"           # 替换 {project} 为你的项目名，如 wf-cn-acme-brand
+main = "wf-cn-{project}-worker.js" # 替换为你的 Worker 文件名
+compatibility_date = "2024-01-01"
+account_id = "YOUR_CLOUDFLARE_ACCOUNT_ID" # 在 CF Dashboard 右侧边栏找到
+
+[[r2_buckets]]
+binding = "MY_BUCKET"
+bucket_name = "wf-cn-{project}-assets" # 替换为你创建的 R2 Bucket 名称
