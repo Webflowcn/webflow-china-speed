@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased] — v2.3
+
+### EdgeOne 缓存与安全
+
+- **fix**: 修复构建产物重复声明 `handleProxyRequest`，并保留完整 EdgeOne `context`
+- **feat**: 使用 `caches.default` + `context.waitUntil()` 实现显式缓存
+- **feat**: 增加 `X-EdgeFlow-Cache: HIT|MISS|BYPASS` 及原因头
+- **security**: 健康检查改为最小状态，不再公开 IP、Cookie、请求头或运行时对象
+- **security**: Cookie、Authorization、Range、非 200、Set-Cookie 和 Geo 301 不写共享缓存
+- **fix**: 重写 `Link` preload 响应头，避免资源通过预加载绕过代理与镜像规则
+- **fix**: 让普通 Webflow CSS 进入文本改写分支，修复背景图和字体绕过代理的问题
+- **test**: 增加构建、Geo、缓存键、Cookie、HEAD、Location、静态资源和浏览器审计覆盖
+
 ## [v2.2] — 2026-07-14
 
 ### 新增许可证

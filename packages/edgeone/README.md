@@ -2,7 +2,7 @@
 
 > EdgeOne 部署路径。与 `packages/cf-worker/`（Cloudflare Worker 路径）并列，用户可按需选择。
 >
-> 本路径深度利用 EdgeOne 的 3200+ 国内边缘节点和内置 CDN 缓存，提供更低的国内延迟和更高的免费额度。
+> 本路径利用 EdgeOne 国内节点、Edge Functions 和显式 Cache API。是否比 Webflow 直连更快，取决于备案、节点调度、缓存命中和源站状态，部署后必须实测。
 
 ## 为什么选择 EdgeOne 路径？
 
@@ -10,23 +10,25 @@
 |------|---------|-------------------|
 | 国内节点 | ✅ 3200+ 边缘节点（全国覆盖） | ❌ 无国内节点 |
 | 免费额度 | 500 万请求/月（Edge Function） | 10 万请求/天（Worker） |
-| 持久缓存 | ✅ 内置 CDN 缓存（无需存储桶方案） | ✅ 需要单独 R2 存储桶 |
+| 缓存 | 节点 Cache API（非持久存储） | R2 持久存储 + 边缘缓存 |
 | 爬虫控制 | ✅ 免费 AI Bot Management（2026.02 上线） | ❌ 需要额外规则 |
 | 部署复杂度 | 腾讯云国内账号 | Cloudflare 全球账号 |
 
 ## 缓存架构
 
-EdgeOne 路径**不需要**类似 Cloudflare R2 的存储桶方案。其内置 CDN 缓存层已经提供了等效功能：
+EdgeOne 路径不需要存储桶，但节点 Cache API **不等同于 R2 持久存储**。函数先检查 `caches.default`，命中后直接返回；未命中才回源、改写并异步写入当前节点缓存。
 
 | 层级 | 组件 | TTL | 说明 |
 |------|------|-----|------|
-| L1 | EdgeOne CDN 边缘节点 | 最长 30 天 | 分布式缓存，命中时完全绕过 Edge Function，零消耗 |
-| L2 | EdgeOne 中心缓存 | 最长 30 天 | 边缘未命中时从中心缓存读取 |
-| L3 | 源站（Webflow） | — | 全缓存未命中时回源，触发一次 Edge Function |
+| L1 | `caches.default` | HTML 默认 5 分钟；指纹资源 30 天 | Edge Function 内显式 HIT/MISS；节点可能提前淘汰 |
+| L2 | EdgeOne 平台缓存规则 | 见 `edgeone.json` | 作为静态资源缓存补充，实际行为需线上验证 |
+| L3 | Webflow 源站 | — | 缓存未命中时回源 |
 
-- 静态资源（CSS/JS/图片）：边缘缓存 TTL 30 天，用户访问几乎零函数消耗
-- HTML 页面：边缘缓存 5 分钟，兼顾内容更新速度和性能
-- **爬虫命中缓存时同样不消耗 Edge Function 配额**
+- 仅中国大陆地区的 `GET`/`HEAD` 参与显式缓存查找。
+- HTML 默认 TTL 5 分钟；带内容指纹的静态资源 30 天；其他静态资源 1 天。
+- 带 `Cookie`、`Authorization`、`Range`、`no-cache/no-store` 的请求直接绕过。
+- 非 200、`Set-Cookie`、私有或 `no-store` 响应不写缓存；Geo 301 永不缓存。
+- 用 `X-EdgeFlow-Cache: HIT|MISS|BYPASS` 判断函数缓存结果，不再根据耗时或 `Age` 猜测。
 
 ## 2026 年 EdgeOne 新功能
 
@@ -46,6 +48,7 @@ EdgeOne 路径**不需要**类似 Cloudflare R2 的存储桶方案。其内置 C
 | v1.0 | 初始版本 |
 | v2.0 | 修复 Geo 路由、Health 端点、缓存地区分离 |
 | v2.1 | 目录整合（`edgeone-optimized` 合并到 `edgeone`）、更新新功能文档 |
+| v2.3（待发布） | 修复构建、显式 Cache API、最小健康检查、Link 头重写、缓存测试 |
 
 ## v2.0 修复内容
 
@@ -88,20 +91,32 @@ EdgeOne 提供免费的爬虫管理能力，无需修改 Edge Function 代码：
 
 ## 验证
 
+本地先执行：
+
+```bash
+cd packages/edgeone
+npm test
+npm run build
+npm run audit:live -- https://你的域名
+```
+
 部署后访问 `https://你的域名/__proxy/health`，应看到：
 
 ```json
-{"ok":true,"runtime":"edgeone-pages","geo":{"detectedCountry":"CN","allGeoHeaders":[...]}}
+{"ok":true,"runtime":"edgeone-pages","version":"2.3.0","originConfigured":true,"cacheApiAvailable":true}
 ```
 
 - 用美国代理访问 → 应 301 重定向到 `webflowcn.webflow.io`
 - 直连访问（CN）→ 正常显示，资源走国内 CDN
+- 连续访问同一公开页面 → 首次应为 `MISS`，同节点后续请求应为 `HIT`
+- 带 Cookie 或 Authorization 访问 → 必须为 `BYPASS`
 
 ## 环境变量
 
  | 变量名 | 必填 | 说明 |
  |--------|------|------|
  | `WEBFLOW_HOST` | 可选 | 你的 Webflow 项目地址（默认 `webflowcn.webflow.io`）|
+ | `CACHE_TTL` | 可选 | HTML 显式缓存 TTL，默认 300 秒 |
  | `MIRROR_JQUERY` | 可选 | jQuery 国内镜像地址 |
 | `MIRROR_JSD_MIRROR` | 可选 | jsDelivr 国内镜像 |
 | `MIRROR_WEBFONT` | 可选 | WebFont loader 国内镜像 |

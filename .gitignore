@@ -8,5 +8,6 @@
 .wrangler/
 packages/cf-worker/.wrangler/
 logs/
-packages/edgeone/scripts/
+packages/edgeone/scripts/*
+!packages/edgeone/scripts/browser-audit.mjs
 packages/cf-worker/scripts/

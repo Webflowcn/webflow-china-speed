@@ -24,16 +24,18 @@
  ## 请求处理流程
 
  1. 用户请求 `cdn.example.com/page`
- 2. 代理检查边缘缓存 → 命中直接返回
- 3. 未命中 → 代理请求 `xxx.webflow.io/page`
- 4. HTML 响应 → 流式（CF）或全量（EO）改写：
+ 2. Edge Function 检查请求是否可缓存；中国大陆公开 GET/HEAD 查询 `caches.default`
+ 3. 命中 → 返回 `X-EdgeFlow-Cache: HIT`
+ 4. 未命中 → 代理请求配置的 Webflow Staging 或正式自定义域名
+ 5. HTML 响应 → 流式（CF）或全量（EO）改写：
     - 替换所有资源 URL 为代理地址
     - 移除 Google Fonts/Analytics 引用
     - 替换 jQuery CDN 为国内镜像
     - 移除 SRI integrity 属性
     - 修正 301/302 Location 头
- 5. CSS/JS/图片 → 重写内部 URL 后缓存
- 6. 视频 → 支持 HTTP Range 分段加载
+ 6. 可安全共享的 200 响应写入节点缓存并返回 `MISS`；敏感或动态响应返回 `BYPASS`
+ 7. CSS/JS/图片 → 重写内部 URL；指纹资源使用长 TTL
+ 8. 视频 Range 请求透传且不写完整对象缓存
 
  ## 缓存架构
 
@@ -42,11 +44,13 @@
  - 静态资源: R2 永久缓存 + 边缘缓存 24h（`cacheTtl: 86400`）
  - 缓存键: 包含 query string，支持版本化资源
 
- ### EdgeOne Pages
- - JS/CSS: 7 天边缘缓存（`"/*.js" ttl: 604800`）
- - 图片/字体: 30 天边缘缓存（`"/*.png" ttl: 2592000`）
- - 静态资产: 30 天（`"/__eo_asset_v3__/*" ttl: 2592000`）
- - 缓存差异化: 按 `EO-Client-IPCountry` 区分
+### EdgeOne Pages
+ - HTML: `caches.default` 显式缓存，默认 5 分钟
+ - 指纹静态资源: 30 天；非指纹静态资源: 1 天
+ - 缓存键: 完整 URL（含 query string）+ `Accept`
+ - 安全边界: 只缓存中国大陆公开 GET；HEAD 可读取已有 GET 缓存但不会用空响应填充
+ - 可观测性: `X-EdgeFlow-Cache` 和 `X-EdgeFlow-Cache-Reason`
+ - `edgeone.json` 仍提供平台静态缓存规则，但不能替代函数层 HIT/MISS 证据
 
  ## 两条路线对比
 
@@ -58,7 +62,7 @@
  | **持久存储** | R2（全球读写） | EdgeOne 节点缓存 |
  | **自定义域名** | Worker 域名绑定 | EdgeOne Pages 域名绑定 |
  | **ICP 要求** | 不需要 | 需要 |
- | **大陆延迟** | 50-150ms（跨境） | 5-20ms（境内节点） |
+ | **大陆延迟** | 取决于出口与回源 | 取决于备案、节点、函数和缓存命中；需实测 |
 
  ## 关键文件
 

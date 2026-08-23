@@ -5,7 +5,7 @@
  > Webflow 网站在中国大陆的被 GFW 封控，无法访问。本仓库提供反向代理解决方案，两条路线可选，5 分钟恢复访问。
 
  **仓库**: `shenyeah/webflow-china-speedup`
- **最新版本**: v2.1
+ **最新发布版本**: v2.2（当前工作树准备 v2.3，尚未部署）
  **自动部署**: [![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/shenyeah/webflow-china-speedup/tree/main/packages/cf-worker) [![使用 EdgeOne Pages 部署](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://console.cloud.tencent.com/edgeone/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fshenyeah%2Fwebflow-china-speedup)
 
  ---
@@ -85,7 +85,8 @@
  ### 通用
  - `WEBFLOW_HOST`: 你的 Webflow 站点标识（如 `webflowcn`），默认值 `webflowcn.webflow.io`
  - `CACHE_TTL`: 边缘缓存 TTL（秒，默认 300）
- - `ACCESS_KEY`: 访问密钥（可选，用于拦截非法请求）
+
+ > 当前 EdgeOne 路线未实现 `ACCESS_KEY`。不要在文档或交付中声称已支持访问密钥。
 
  ---
 

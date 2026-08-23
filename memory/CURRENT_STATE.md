@@ -1,8 +1,8 @@
  # Current State
 
- **版本**: v2.1
- **状态**: 稳定维护
- **最后更新**: 2026-07-14
+ **版本**: v2.2 已发布；v2.3 本地优化中
+ **状态**: v2.3 已完成本地测试，尚未部署
+ **最后更新**: 2026-08-23
  
  ## 已完成的里程碑
  
@@ -10,6 +10,7 @@
  - [x] v2.0: 双路线架构（CF Worker + EdgeOne Pages）
  - [x] v2.1: 优化 - content-length 修复 / 24h 缓存 / Crawl-delay / EdgeOne 清理
  - [x] v2.1.1: 零配置部署 — 移除 wrangler.toml [vars] 占位符，代码 fallback 兜底；EdgeOne 已有代码层默认值
+ - [x] v2.3（本地）: 构建修复、显式缓存、安全健康检查、Link 头重写与自动化测试
  
  ## 当前覆盖的优化项
  
@@ -29,5 +30,6 @@
 
  ## 已知问题
  
- - EdgeOne 边缘函数使用 `replaceAll()` 做 HTML 改写，对大型 HTML 页面内存占用较高
- - 无 ICP 备案的 EdgeOne 用户只能走海外节点，延迟优势不明显
+ - EdgeOne 边缘函数使用字符串全量改写 HTML，对大型页面内存占用较高
+ - 当前 `tectura-cn.webflowcn.com` 线上仍是旧版本；v2.3 缓存效果必须部署到测试域名后复测
+ - 2026-08-23 中国大陆同机直连冷加载中，旧版 EdgeOne 的 TTFB/LCP/Load 均慢于同项目 Staging
