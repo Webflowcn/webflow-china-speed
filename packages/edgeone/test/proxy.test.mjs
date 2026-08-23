@@ -5,6 +5,7 @@ import { handleProxyRequest } from "../edge-functions/_shared/proxy.js";
 
 const originalFetch = globalThis.fetch;
 const originalCaches = globalThis.caches;
+const originalSnapshotStore = globalThis.EDGEFLOW_SNAPSHOT;
 
 class MemoryCache {
   constructor() {
@@ -26,6 +27,27 @@ class MemoryCache {
 
   async delete(request) {
     return this.items.delete(this.key(request));
+  }
+}
+
+class MemoryKv {
+  constructor() {
+    this.items = new Map();
+  }
+
+  async get(key, options) {
+    const value = this.items.get(key);
+    if (value == null) return null;
+    const type = typeof options === "string" ? options : options?.type;
+    return type === "json" ? JSON.parse(value) : value;
+  }
+
+  async put(key, value) {
+    this.items.set(key, String(value));
+  }
+
+  async delete(key) {
+    this.items.delete(key);
   }
 }
 
@@ -52,11 +74,14 @@ function htmlResponse(body = "<html><body>ok</body></html>", init = {}) {
 
 beforeEach(() => {
   globalThis.caches = { default: new MemoryCache() };
+  delete globalThis.EDGEFLOW_SNAPSHOT;
 });
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
   globalThis.caches = originalCaches;
+  if (originalSnapshotStore === undefined) delete globalThis.EDGEFLOW_SNAPSHOT;
+  else globalThis.EDGEFLOW_SNAPSHOT = originalSnapshotStore;
 });
 
 test("public CN HTML is cached with observable MISS then HIT", async () => {
@@ -170,12 +195,14 @@ test("health response is minimal and contains no request or runtime dump", async
     "ok",
     "originConfigured",
     "runtime",
+    "snapshotStoreAvailable",
     "version"
   ]);
   assert.equal(JSON.stringify(body).includes("203.0.113.8"), false);
   assert.equal(JSON.stringify(body).includes("private=value"), false);
-  assert.equal(body.version, "2.3.1");
+  assert.equal(body.version, "2.4.0");
   assert.equal(body.cacheApiAvailable, true);
+  assert.equal(body.snapshotStoreAvailable, false);
   assert.equal(response.headers.get("x-edgeflow-cache"), "BYPASS");
 });
 
@@ -414,4 +441,181 @@ test("missing Cache API degrades safely to BYPASS", async () => {
   );
   assert.equal(response.headers.get("x-edgeflow-cache"), "BYPASS");
   assert.equal(response.headers.get("x-edgeflow-cache-reason"), "cache-api-unavailable");
+});
+
+test("KV snapshot persists rewritten HTML when Cache API is unavailable", async () => {
+  globalThis.caches = undefined;
+  globalThis.EDGEFLOW_SNAPSHOT = new MemoryKv();
+  let fetchCount = 0;
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    return htmlResponse("<html><body>persistent snapshot</body></html>");
+  };
+
+  const context = createContext();
+  const request = new Request("https://proxy.example.com/");
+  const first = await handleProxyRequest(request, { WEBFLOW_HOST: "origin.example.com" }, context);
+  assert.equal(first.headers.get("x-edgeflow-cache"), "MISS");
+  assert.equal(first.headers.get("x-edgeflow-snapshot"), "MISS");
+  await settle(context);
+
+  const second = await handleProxyRequest(request, { WEBFLOW_HOST: "origin.example.com" }, createContext());
+  assert.equal(second.headers.get("x-edgeflow-cache"), "HIT");
+  assert.equal(second.headers.get("x-edgeflow-cache-reason"), "snapshot-fresh");
+  assert.equal(second.headers.get("x-edgeflow-snapshot"), "FRESH");
+  assert.equal(await second.text(), await first.text());
+  assert.equal(fetchCount, 1);
+});
+
+test("stale KV snapshot is served immediately and refreshed in background", async () => {
+  globalThis.caches = undefined;
+  const kv = new MemoryKv();
+  globalThis.EDGEFLOW_SNAPSHOT = kv;
+  let body = "old";
+  let fetchCount = 0;
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    return htmlResponse(`<html><body>${body}</body></html>`);
+  };
+
+  const request = new Request("https://proxy.example.com/");
+  const warmContext = createContext();
+  const warm = await handleProxyRequest(request, {
+    WEBFLOW_HOST: "origin.example.com",
+    SNAPSHOT_TTL: "1"
+  }, warmContext);
+  await settle(warmContext);
+  assert.equal(warm.headers.get("x-edgeflow-snapshot"), "MISS");
+
+  const [key, serialized] = [...kv.items.entries()][0];
+  const expired = JSON.parse(serialized);
+  expired.storedAt = Date.now() - 5000;
+  kv.items.set(key, JSON.stringify(expired));
+  body = "new";
+
+  const staleContext = createContext();
+  const stale = await handleProxyRequest(request, {
+    WEBFLOW_HOST: "origin.example.com",
+    SNAPSHOT_TTL: "1"
+  }, staleContext);
+  assert.equal(stale.headers.get("x-edgeflow-snapshot"), "STALE");
+  assert.equal(stale.headers.get("x-edgeflow-refresh"), "BACKGROUND");
+  assert.match(await stale.text(), /old/);
+  await settle(staleContext);
+
+  const fresh = await handleProxyRequest(request, {
+    WEBFLOW_HOST: "origin.example.com",
+    SNAPSHOT_TTL: "60"
+  }, createContext());
+  assert.equal(fresh.headers.get("x-edgeflow-snapshot"), "FRESH");
+  assert.match(await fresh.text(), /new/);
+  assert.equal(fetchCount, 2);
+});
+
+test("failed background refresh keeps serving the last successful snapshot", async () => {
+  globalThis.caches = undefined;
+  const kv = new MemoryKv();
+  globalThis.EDGEFLOW_SNAPSHOT = kv;
+  globalThis.fetch = async () => htmlResponse("<html><body>last known good</body></html>");
+  const request = new Request("https://proxy.example.com/");
+  const warmContext = createContext();
+  await handleProxyRequest(request, {
+    WEBFLOW_HOST: "origin.example.com",
+    SNAPSHOT_TTL: "1"
+  }, warmContext);
+  await settle(warmContext);
+
+  const [key, serialized] = [...kv.items.entries()][0];
+  const expired = JSON.parse(serialized);
+  expired.storedAt = Date.now() - 5000;
+  kv.items.set(key, JSON.stringify(expired));
+  globalThis.fetch = async () => { throw new Error("origin unavailable"); };
+
+  const staleContext = createContext();
+  const stale = await handleProxyRequest(request, {
+    WEBFLOW_HOST: "origin.example.com",
+    SNAPSHOT_TTL: "1"
+  }, staleContext);
+  assert.equal(stale.status, 200);
+  assert.equal(stale.headers.get("x-edgeflow-snapshot"), "STALE");
+  assert.match(await stale.text(), /last known good/);
+  await settle(staleContext);
+
+  const stillAvailable = await handleProxyRequest(request, {
+    WEBFLOW_HOST: "origin.example.com",
+    SNAPSHOT_TTL: "1"
+  }, createContext());
+  assert.equal(stillAvailable.status, 200);
+  assert.match(await stillAvailable.text(), /last known good/);
+});
+
+test("tracking query parameters share a snapshot while functional queries do not", async () => {
+  globalThis.EDGEFLOW_SNAPSHOT = new MemoryKv();
+  let fetchCount = 0;
+  globalThis.fetch = async (url) => {
+    fetchCount += 1;
+    return htmlResponse(`<html><body>${new URL(url).search}</body></html>`);
+  };
+
+  const firstContext = createContext();
+  await handleProxyRequest(
+    new Request("https://proxy.example.com/?utm_source=test"),
+    { WEBFLOW_HOST: "origin.example.com" },
+    firstContext
+  );
+  await settle(firstContext);
+
+  const trackingHit = await handleProxyRequest(
+    new Request("https://proxy.example.com/?gclid=123"),
+    { WEBFLOW_HOST: "origin.example.com" },
+    createContext()
+  );
+  assert.equal(trackingHit.headers.get("x-edgeflow-snapshot"), "FRESH");
+
+  const functional = await handleProxyRequest(
+    new Request("https://proxy.example.com/?category=chairs"),
+    { WEBFLOW_HOST: "origin.example.com" },
+    createContext()
+  );
+  assert.equal(functional.headers.get("x-edgeflow-snapshot"), null);
+  assert.equal(fetchCount, 2);
+});
+
+test("authenticated refresh endpoint updates configured snapshot paths", async () => {
+  globalThis.caches = undefined;
+  globalThis.EDGEFLOW_SNAPSHOT = new MemoryKv();
+  globalThis.fetch = async (url) => htmlResponse(`<html><body>${new URL(url).pathname}</body></html>`);
+  const env = {
+    WEBFLOW_HOST: "origin.example.com",
+    SNAPSHOT_REFRESH_SECRET: "test-secret",
+    SNAPSHOT_PATHS: "/,/about"
+  };
+
+  const unauthorized = await handleProxyRequest(
+    new Request("https://proxy.example.com/__proxy/refresh", { method: "POST" }),
+    env,
+    createContext()
+  );
+  assert.equal(unauthorized.status, 401);
+
+  const refreshed = await handleProxyRequest(
+    new Request("https://proxy.example.com/__proxy/refresh", {
+      method: "POST",
+      headers: { authorization: "Bearer test-secret" }
+    }),
+    env,
+    createContext()
+  );
+  assert.equal(refreshed.status, 200);
+  assert.deepEqual((await refreshed.json()).results, [
+    { path: "/", ok: true },
+    { path: "/about", ok: true }
+  ]);
+
+  const hit = await handleProxyRequest(
+    new Request("https://proxy.example.com/about"),
+    env,
+    createContext()
+  );
+  assert.equal(hit.headers.get("x-edgeflow-snapshot"), "FRESH");
 });

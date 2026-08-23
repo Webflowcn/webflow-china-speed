@@ -44,13 +44,13 @@
 
  ---
 
- ## ADR-005: EdgeOne 不使用持久存储
+ ## ADR-005: EdgeOne HTML 使用 Makers KV 持久快照
 
- **决策**: EdgeOne Pages 路线仅依赖边缘节点缓存，不使用持久化存储。
+ **决策**: EdgeOne Makers 路线使用 KV 保存已重写 HTML，静态资源继续使用节点 Cache API；大规模公开资源后续迁移 COS。
 
- **背景**: EdgeOne 不提供 R2 等效的持久存储服务。仅设置响应缓存头无法证明函数是否避免了跨境回源，因此需要显式 Cache API 和可观测状态。
+ **背景**: 线上实测连续请求仍然全部 MISS，实时回源和 HTML 全量重写合计可增加数百毫秒到一秒以上。Makers 已提供 KV 和 Blob，旧的“没有持久存储”判断不再成立。
 
- **结果**: 使用 `caches.default` 缓存可安全共享的中国大陆 GET 响应，通过 `context.waitUntil()` 异步写入。Cookie、Authorization、Range、非 200、Set-Cookie 和 Geo 301 均绕过，并以 `X-EdgeFlow-Cache` 暴露结果。节点缓存仍可能提前淘汰，不能描述为持久缓存。
+ **结果**: 匿名中国大陆 HTML 请求优先读取 `EDGEFLOW_SNAPSHOT`。快照过期仍立即返回旧版本，并在后台更新；更新失败保留最后成功版本。Cookie、Authorization、Range、功能性查询、非 200、Set-Cookie 和 Geo 301 均绕过。`caches.default` 保留为 KV 不可用时的兼容层和静态资源缓存。
 
  ---
 

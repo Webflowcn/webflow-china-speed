@@ -1,4 +1,4 @@
-# Webflow China Speedup — EdgeOne Pages
+# Webflow China Speedup — EdgeOne Makers
 
 > EdgeOne 部署路径。与 `packages/cf-worker/`（Cloudflare Worker 路径）并列，用户可按需选择。
 >
@@ -9,26 +9,30 @@
 | 特性 | EdgeOne | Cloudflare Worker |
 |------|---------|-------------------|
 | 国内节点 | ✅ 3200+ 边缘节点（全国覆盖） | ❌ 无国内节点 |
-| 免费额度 | 500 万请求/月（Edge Function） | 10 万请求/天（Worker） |
-| 缓存 | 节点 Cache API（非持久存储） | R2 持久存储 + 边缘缓存 |
+| 免费额度 | 以 Makers 当前配额页为准（当前 Edge Function 300 万次/月） | 10 万请求/天（Worker） |
+| 缓存 | Makers KV 持久 HTML 快照 + 节点 Cache API | R2 持久存储 + 边缘缓存 |
 | 爬虫控制 | ✅ 免费 AI Bot Management（2026.02 上线） | ❌ 需要额外规则 |
 | 部署复杂度 | 腾讯云国内账号 | Cloudflare 全球账号 |
 
 ## 缓存架构
 
-EdgeOne 路径不需要存储桶，但节点 Cache API **不等同于 R2 持久存储**。函数先检查 `caches.default`，命中后直接返回；未命中才回源、改写并异步写入当前节点缓存。
+v2.4 优先从 Makers KV 读取已经完成改写的 HTML 快照。快照新鲜时直接返回；过期时先返回旧快照，再通过 `context.waitUntil()` 后台刷新。KV 不可用时安全降级到原有 Cache API 和实时回源。
 
 | 层级 | 组件 | TTL | 说明 |
 |------|------|-----|------|
-| L1 | `caches.default` | HTML 默认 5 分钟；指纹资源 30 天 | Edge Function 内显式 HIT/MISS；节点可能提前淘汰 |
-| L2 | EdgeOne 平台缓存规则 | 见 `edgeone.json` | 作为静态资源缓存补充，实际行为需线上验证 |
-| L3 | Webflow 源站 | — | 缓存未命中时回源 |
+| L1 | Makers KV `EDGEFLOW_SNAPSHOT` | HTML 默认 15 分钟后后台刷新 | 持久保存最后成功快照；边缘读取最长约 60 秒最终一致 |
+| L2 | `caches.default` | HTML 默认 5 分钟；指纹资源 30 天 | Edge Function 节点缓存，可能提前淘汰 |
+| L3 | EdgeOne 平台缓存规则 | 见 `edgeone.json` | 代理静态资源的原生缓存补充 |
+| L4 | Webflow 源站 | — | 所有缓存未命中或后台刷新时才回源 |
 
 - 仅中国大陆地区的 `GET`/`HEAD` 参与显式缓存查找。
-- HTML 默认 TTL 5 分钟；带内容指纹的静态资源 30 天；其他静态资源 1 天。
+- HTML KV 快照默认 15 分钟后转为 STALE；用户仍立即得到旧快照，刷新在后台进行。
+- 带内容指纹的静态资源缓存 30 天；其他静态资源 1 天。
 - 带 `Cookie`、`Authorization`、`Range`、`no-cache/no-store` 的请求直接绕过。
 - 非 200、`Set-Cookie`、私有或 `no-store` 响应不写缓存；Geo 301 永不缓存。
-- 用 `X-EdgeFlow-Cache: HIT|MISS|BYPASS` 判断函数缓存结果，不再根据耗时或 `Age` 猜测。
+- 用 `X-EdgeFlow-Snapshot: FRESH|STALE|MISS` 判断持久快照状态。
+- 用 `X-EdgeFlow-Cache: HIT|MISS|BYPASS` 判断整体缓存结果，不再根据耗时或 `Age` 猜测。
+- 带功能性查询参数、Cookie、Authorization 或 Range 的请求不进入 HTML 公共快照；常见 tracking 参数会归一化。
 
 ## 2026 年 EdgeOne 新功能
 
@@ -37,9 +41,10 @@ EdgeOne 路径不需要存储桶，但节点 Cache API **不等同于 R2 持久�
 | AI Bot Management（爬虫控制） | 2026.02 | 可在控制台免费开启，无需代码修改 |
 | AI 爬虫画像库 | 2026.03 | 自动识别 AI 爬虫并限制频率，GUI 配置 |
 | 永久免费套餐 | 2026.03 | 基础 Edge Function 配额永久免费 |
-| 一键式 KV 存储 | 2026.05 | 如需要缓存共享数据，控制台直接开启 |
+| KV 持久存储 | 2026.05 | v2.4 用于保存已重写 HTML 和最后成功版本 |
+| Blob 对象存储 | 2026.06 | 可保存较大快照；大量公开静态资产仍建议使用 COS |
 
-以上功能均通过 EdgeOne 控制台 GUI 配置，无需修改 Edge Function 代码。
+KV 命名空间需要在 EdgeOne Makers 控制台创建并绑定到项目，绑定变量名固定为 `EDGEFLOW_SNAPSHOT`。
 
 ## 版本历史
 
@@ -50,6 +55,7 @@ EdgeOne 路径不需要存储桶，但节点 Cache API **不等同于 R2 持久�
 | v2.1 | 目录整合（`edgeone-optimized` 合并到 `edgeone`）、更新新功能文档 |
 | v2.3 | 修复构建、显式 Cache API、最小健康检查、Link 头重写、缓存测试 |
 | v2.3.1 | 修复 Makers 原生缓存 schema、过期元数据、缓存自愈与分阶段计时 |
+| v2.4 | 增加 KV 持久 HTML 快照、stale-while-refresh、主动刷新端点和最后成功版本回退 |
 
 ## v2.0 修复内容
 
@@ -71,7 +77,9 @@ EdgeOne 路径不需要存储桶，但节点 Cache API **不等同于 R2 持久�
  5. 构建配置留空，直接创建
  6. 绑定自定义域名 → 代理立即生效（默认 `webflowcn.webflow.io` 演示站点）
  7. 要代理你自己的网站，在控制台 → 环境变量添加 `WEBFLOW_HOST` = 你的 `xxx.webflow.io`，然后重新部署
- 8. （可选）在控制台开启 AI Bot Management 限制爬虫频率
+8. （可选）在控制台开启 AI Bot Management 限制爬虫频率
+9. 在项目 → KV 存储中创建/绑定命名空间，运行时变量名填写 `EDGEFLOW_SNAPSHOT`
+10. 在环境变量中设置 `SNAPSHOT_REFRESH_SECRET`，供 SCF 或发布 webhook 调用刷新端点
 
  ### 方式二：直接上传文件夹
  
@@ -104,12 +112,13 @@ npm run audit:live -- https://你的域名
 部署后访问 `https://你的域名/__proxy/health`，应看到：
 
 ```json
-{"ok":true,"runtime":"edgeone-pages","version":"2.3.1","originConfigured":true,"cacheApiAvailable":true}
+{"ok":true,"runtime":"edgeone-pages","version":"2.4.0","originConfigured":true,"cacheApiAvailable":true,"snapshotStoreAvailable":true}
 ```
 
 - 用美国代理访问 → 应 301 重定向到 `webflowcn.webflow.io`
 - 直连访问（CN）→ 正常显示，资源走国内 CDN
-- 连续访问同一公开页面 → 首次应为 `MISS`，同节点后续请求应为 `HIT`
+- 连续访问同一公开页面 → 首次 `X-EdgeFlow-Snapshot: MISS`，后续为 `FRESH`
+- 超过 `SNAPSHOT_TTL` → 仍立即返回 `STALE`，同时出现 `X-EdgeFlow-Refresh: BACKGROUND`
 - 带 Cookie 或 Authorization 访问 → 必须为 `BYPASS`
 - 查看 `Server-Timing` → 可分别检查 cache、origin、rewrite 与 total 耗时
 
@@ -119,14 +128,28 @@ npm run audit:live -- https://你的域名
  |--------|------|------|
  | `WEBFLOW_HOST` | 可选 | 你的 Webflow 项目地址（默认 `webflowcn.webflow.io`）|
  | `CACHE_TTL` | 可选 | HTML 显式缓存 TTL，默认 300 秒 |
+ | `SNAPSHOT_TTL` | 可选 | KV HTML 快照新鲜期，默认 900 秒 |
+ | `SNAPSHOT_PATHS` | 可选 | 主动刷新页面列表，英文逗号分隔，默认 `/` |
+ | `SNAPSHOT_REFRESH_SECRET` | 可选 | 主动刷新端点密钥；必须放在控制台环境变量，不要提交到 Git |
  | `MIRROR_JQUERY` | 可选 | jQuery 国内镜像地址 |
 | `MIRROR_JSD_MIRROR` | 可选 | jsDelivr 国内镜像 |
 | `MIRROR_WEBFONT` | 可选 | WebFont loader 国内镜像 |
 | `ASSET_PROXY_PREFIX` | 可选 | 资源代理路径前缀（默认 `/__eo_asset_v3__`） |
+
+KV 本身不是普通环境变量。在 Makers 控制台把目标命名空间绑定为 `EDGEFLOW_SNAPSHOT` 后，函数会自动启用持久快照；未绑定时保持兼容降级。
+
+主动刷新示例：
+
+```bash
+curl -X POST 'https://你的域名/__proxy/refresh' \
+  -H 'Authorization: Bearer 你的环境密钥' \
+  -H 'Content-Type: application/json' \
+  --data '{"paths":["/","/about"]}'
+```
 
 ## 注意事项
 
 - 首次部署后，用海外代理访问确认是否触发了 301 重定向
 - 如果 Geo 路由仍不工作，检查腾讯云 EdgeOne 控制台 → 「回源 HTTP 请求头」是否传递了 `EO-Client-IPCountry`
 - 如需限制爬虫频率，优先使用 EdgeOne 控制台的 Bot Management 功能，不需要修改函数代码
-- EdgeOne 免费配额：500 万次 Edge Function 调用/月（2026.07 标准），普通站点远用不完
+- EdgeOne 免费配额和存储限制会调整，部署前以 Makers 官方 Limits and Quotas 页面为准

@@ -1,8 +1,9 @@
 /**
- * Webflow China Speedup — EdgeOne Pages 代理核心逻辑 (v2.3.1)
+ * Webflow China Speedup — EdgeOne Makers 代理核心逻辑 (v2.4.0)
  *
  * ╔═══════════════════════════════════════════════════════════════╗
  * ║  改动记录                                                     ║
+ * ║  [v2.4.0] KV 持久 HTML 快照 + 后台刷新 + 故障回退           ║
  * ║  [v2.3.1] 修复原生缓存配置 + 过期元数据 + 回源计时           ║
  * ║  [v2.3] 显式 Cache API + 安全健康检查 + 可观测缓存状态       ║
  * ║  [v2.0] 修复 Geo 路由不生效 + 缓存不分地区 + Health 500      ║
@@ -41,6 +42,11 @@ const STATIC_EXT_RE = /\.(?:js|mjs|css|png|jpg|jpeg|gif|webp|svg|ico|woff2|woff|
 const FINGERPRINT_RE = /(?:^|[._/-])[a-f0-9]{8,}(?:[._/-]|$)/i;
 const EDGEFLOW_CACHE_HEADER = "x-edgeflow-cache";
 const EDGEFLOW_CACHE_REASON_HEADER = "x-edgeflow-cache-reason";
+const EDGEFLOW_SNAPSHOT_HEADER = "x-edgeflow-snapshot";
+const EDGEFLOW_SNAPSHOT_AGE_HEADER = "x-edgeflow-snapshot-age";
+const SNAPSHOT_SCHEMA_VERSION = 1;
+const TRACKING_QUERY_RE = /^(?:utm_[a-z0-9_]+|fbclid|gclid|msclkid)$/i;
+const activeSnapshotRefreshes = new Map();
 
 /**
  * 获取客户端地区代码 — 从多个来源 fallback
@@ -84,9 +90,10 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
     const body = JSON.stringify({
       ok: true,
       runtime: "edgeone-pages",
-      version: "2.3.1",
+      version: "2.4.0",
       originConfigured: Boolean(cfg.originHost),
-      cacheApiAvailable: Boolean(globalThis.caches && globalThis.caches.default)
+      cacheApiAvailable: Boolean(globalThis.caches && globalThis.caches.default),
+      snapshotStoreAvailable: Boolean(resolveSnapshotStore(env))
     });
 
     return withServerTiming(withCacheStatus(new Response(body, {
@@ -99,6 +106,10 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
       cacheStatus: "BYPASS",
       totalMs: elapsedMs(requestStartedAt)
     });
+  }
+
+  if (reqUrl.pathname === "/__proxy/refresh") {
+    return handleSnapshotRefreshEndpoint(request, env, context, cfg, reqUrl);
   }
 
   // Serve generated robots.txt and sitemap.xml
@@ -162,6 +173,39 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
     return new Response("400 Invalid asset proxy target", { status: 400 });
   }
 
+  const snapshotPlan = await createSnapshotPlan(request, reqUrl, target, cfg, country, env);
+  let snapshotLookupMs = 0;
+  if (snapshotPlan.lookup) {
+    const snapshotLookupStartedAt = monotonicNow();
+    try {
+      const record = await snapshotPlan.store.get(snapshotPlan.key, { type: "json" });
+      snapshotLookupMs = elapsedMs(snapshotLookupStartedAt);
+      if (isValidSnapshotRecord(record)) {
+        const ageSeconds = Math.max(0, Math.floor((Date.now() - record.storedAt) / 1000));
+        const stale = ageSeconds >= snapshotPlan.ttl;
+        if (stale && snapshotPlan.canRefresh) {
+          const refreshTask = refreshSnapshot(snapshotPlan, request, target, cfg).catch(() => ({ ok: false }));
+          if (context && typeof context.waitUntil === "function") context.waitUntil(refreshTask);
+        }
+        const snapshotResponse = responseFromSnapshot(record, request.method, ageSeconds);
+        return withServerTiming(withSnapshotStatus(
+          withCacheStatus(snapshotResponse, "HIT", request.method, stale ? "snapshot-stale" : "snapshot-fresh"),
+          stale ? "STALE" : "FRESH",
+          ageSeconds,
+          stale ? "BACKGROUND" : ""
+        ), {
+          cacheStatus: "HIT",
+          cacheLookupMs: snapshotLookupMs,
+          totalMs: elapsedMs(requestStartedAt)
+        });
+      }
+    } catch (_snapshotReadError) {
+      snapshotLookupMs = elapsedMs(snapshotLookupStartedAt);
+      snapshotPlan.lookup = false;
+      snapshotPlan.reason = "snapshot-read-error";
+    }
+  }
+
   const cachePlan = createCachePlan(request, reqUrl, target, cfg, country);
   let cacheLookupMs = 0;
   if (cachePlan.lookup) {
@@ -208,6 +252,13 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
   const rewritten = await rewriteResponse(upstreamResp, reqUrl, request.method, target, cfg);
   const rewriteMs = elapsedMs(rewriteStartedAt);
   const storeDecision = canStoreResponse(rewritten, cachePlan);
+  const snapshotDecision = canStoreSnapshot(rewritten, snapshotPlan);
+
+  if (snapshotDecision.store) {
+    const snapshotTask = storeSnapshot(snapshotPlan, rewritten.clone());
+    if (context && typeof context.waitUntil === "function") context.waitUntil(snapshotTask);
+    else await snapshotTask;
+  }
 
   if (storeDecision.store) {
     const cachedResponse = rewritten.clone();
@@ -217,9 +268,27 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
     } else {
       await putTask;
     }
-    return withServerTiming(withCacheStatus(rewritten, "MISS", request.method, cachePlan.kind), {
+    const missResponse = withCacheStatus(rewritten, "MISS", request.method, cachePlan.kind);
+    return withServerTiming(snapshotDecision.store
+      ? withSnapshotStatus(missResponse, "MISS", 0, "")
+      : missResponse, {
       cacheStatus: "MISS",
-      cacheLookupMs,
+      cacheLookupMs: cacheLookupMs + snapshotLookupMs,
+      originMs,
+      rewriteMs,
+      totalMs: elapsedMs(requestStartedAt)
+    });
+  }
+
+  if (snapshotDecision.store) {
+    return withServerTiming(withSnapshotStatus(
+      withCacheStatus(rewritten, "MISS", request.method, "snapshot"),
+      "MISS",
+      0,
+      ""
+    ), {
+      cacheStatus: "MISS",
+      cacheLookupMs: snapshotLookupMs,
       originMs,
       rewriteMs,
       totalMs: elapsedMs(requestStartedAt)
@@ -248,8 +317,202 @@ function resolveSiteConfig(env) {
     mirrorJquery: env.MIRROR_JQUERY || DEFAULT_CONFIG.mirrorJquery,
     mirrorWebfont: env.MIRROR_WEBFONT || DEFAULT_CONFIG.mirrorWebfont,
     mirrorJsdMirror: env.MIRROR_JSD_MIRROR || DEFAULT_CONFIG.mirrorJsdMirror,
-    htmlCacheTtl: parsePositiveInt(env.CACHE_TTL, 300)
+    htmlCacheTtl: parsePositiveInt(env.CACHE_TTL, 300),
+    snapshotTtl: parsePositiveInt(env.SNAPSHOT_TTL, 900),
+    snapshotPaths: parseSnapshotPaths(env.SNAPSHOT_PATHS || "/")
   };
+}
+
+async function createSnapshotPlan(request, reqUrl, target, cfg, country, env, options = {}) {
+  const method = request.method.toUpperCase();
+  const store = resolveSnapshotStore(env);
+  const base = {
+    lookup: false,
+    canRefresh: false,
+    store: null,
+    key: null,
+    ttl: cfg.snapshotTtl,
+    reason: "snapshot-unavailable",
+    requestUrl: null
+  };
+
+  if (!store || typeof store.get !== "function" || typeof store.put !== "function") return base;
+  if (method !== "GET" && method !== "HEAD") return { ...base, store, reason: "snapshot-method" };
+  if (!options.force && country !== "CN") return { ...base, store, reason: country ? "snapshot-geo" : "snapshot-geo-unknown" };
+  if (target.assetProxy || classifyCacheKind(target) !== "html") return { ...base, store, reason: "snapshot-non-html" };
+  if (request.headers.get("authorization")) return { ...base, store, reason: "snapshot-authorization" };
+  if (request.headers.get("cookie")) return { ...base, store, reason: "snapshot-cookie" };
+  if (request.headers.get("range")) return { ...base, store, reason: "snapshot-range" };
+
+  const normalizedUrl = normalizeSnapshotUrl(reqUrl);
+  if (!normalizedUrl) return { ...base, store, reason: "snapshot-query" };
+
+  return {
+    ...base,
+    lookup: !options.force,
+    canRefresh: method === "GET",
+    store,
+    key: await makeSnapshotKey(normalizedUrl),
+    requestUrl: normalizedUrl,
+    reason: "snapshot-miss"
+  };
+}
+
+function resolveSnapshotStore(env = {}) {
+  if (env.EDGEFLOW_SNAPSHOT) return env.EDGEFLOW_SNAPSHOT;
+  if (typeof EDGEFLOW_SNAPSHOT !== "undefined") return EDGEFLOW_SNAPSHOT;
+  if (globalThis.EDGEFLOW_SNAPSHOT) return globalThis.EDGEFLOW_SNAPSHOT;
+  return null;
+}
+
+function normalizeSnapshotUrl(inputUrl) {
+  const normalized = new URL(inputUrl.toString());
+  for (const key of [...normalized.searchParams.keys()]) {
+    if (!TRACKING_QUERY_RE.test(key)) return null;
+    normalized.searchParams.delete(key);
+  }
+  normalized.search = "";
+  normalized.hash = "";
+  return normalized;
+}
+
+async function makeSnapshotKey(url) {
+  const input = new TextEncoder().encode(url.toString());
+  if (globalThis.crypto && globalThis.crypto.subtle) {
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", input);
+    const hex = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    return `html_${hex}`;
+  }
+  let hash = 2166136261;
+  for (const byte of input) {
+    hash ^= byte;
+    hash = Math.imul(hash, 16777619);
+  }
+  return `html_fallback_${(hash >>> 0).toString(16)}`;
+}
+
+function isValidSnapshotRecord(record) {
+  return Boolean(
+    record &&
+    record.version === SNAPSHOT_SCHEMA_VERSION &&
+    record.status === 200 &&
+    Number.isFinite(record.storedAt) &&
+    typeof record.body === "string" &&
+    Array.isArray(record.headers)
+  );
+}
+
+function responseFromSnapshot(record, method, ageSeconds) {
+  const headers = new Headers(record.headers);
+  headers.delete("content-length");
+  headers.delete("server-timing");
+  headers.set(EDGEFLOW_SNAPSHOT_AGE_HEADER, String(ageSeconds));
+  return new Response(method === "HEAD" ? null : record.body, {
+    status: record.status,
+    statusText: record.statusText || "OK",
+    headers
+  });
+}
+
+function canStoreSnapshot(response, snapshotPlan) {
+  if (!snapshotPlan.store || !snapshotPlan.key || !snapshotPlan.canRefresh) {
+    return { store: false, reason: snapshotPlan.reason };
+  }
+  if (response.status !== 200) return { store: false, reason: `snapshot-status-${response.status}` };
+  if (!(response.headers.get("content-type") || "").toLowerCase().includes("text/html")) {
+    return { store: false, reason: "snapshot-content-type" };
+  }
+  if (response.headers.get("set-cookie")) return { store: false, reason: "snapshot-set-cookie" };
+  return { store: true, reason: "" };
+}
+
+async function storeSnapshot(snapshotPlan, response) {
+  const headers = new Headers(response.headers);
+  headers.delete("content-length");
+  headers.delete("server-timing");
+  headers.delete(EDGEFLOW_CACHE_HEADER);
+  headers.delete(EDGEFLOW_CACHE_REASON_HEADER);
+  headers.delete(EDGEFLOW_SNAPSHOT_HEADER);
+  headers.delete(EDGEFLOW_SNAPSHOT_AGE_HEADER);
+  const record = {
+    version: SNAPSHOT_SCHEMA_VERSION,
+    storedAt: Date.now(),
+    status: response.status,
+    statusText: response.statusText,
+    headers: [...headers.entries()],
+    body: await response.text()
+  };
+  await snapshotPlan.store.put(snapshotPlan.key, JSON.stringify(record));
+}
+
+function refreshSnapshot(snapshotPlan, request, target, cfg) {
+  const active = activeSnapshotRefreshes.get(snapshotPlan.key);
+  if (active) return active;
+  const task = (async () => {
+    const upstreamHeaders = buildUpstreamHeaders(request, snapshotPlan.requestUrl, target.upstreamHost);
+    const upstreamResp = await fetch(target.upstreamUrl.toString(), {
+      method: "GET",
+      headers: upstreamHeaders,
+      redirect: "manual"
+    });
+    const rewritten = await rewriteResponse(upstreamResp, snapshotPlan.requestUrl, "GET", target, cfg);
+    const decision = canStoreSnapshot(rewritten, snapshotPlan);
+    if (!decision.store) throw new Error(decision.reason);
+    await storeSnapshot(snapshotPlan, rewritten);
+    return { ok: true };
+  })().finally(() => activeSnapshotRefreshes.delete(snapshotPlan.key));
+  activeSnapshotRefreshes.set(snapshotPlan.key, task);
+  return task;
+}
+
+async function handleSnapshotRefreshEndpoint(request, env, context, cfg, reqUrl) {
+  if (request.method !== "POST") {
+    return new Response("Method Not Allowed", { status: 405, headers: { allow: "POST" } });
+  }
+  const secret = env.SNAPSHOT_REFRESH_SECRET || "";
+  if (!secret) {
+    return new Response("Snapshot refresh is not configured", { status: 503 });
+  }
+
+  let payload = {};
+  try { payload = await request.json(); } catch (_error) {}
+  const authorization = request.headers.get("authorization") || "";
+  const supplied = authorization.startsWith("Bearer ") ? authorization.slice(7) : payload.token;
+  if (!supplied || supplied !== secret) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
+  const requestedPaths = Array.isArray(payload.paths) ? payload.paths : cfg.snapshotPaths;
+  const paths = requestedPaths
+    .filter((path) => typeof path === "string" && path.startsWith("/") && !path.startsWith("//"))
+    .slice(0, 20);
+  const results = [];
+  for (const path of paths) {
+    try {
+      const publicUrl = new URL(path, `${reqUrl.protocol}//${reqUrl.host}`);
+      const refreshRequest = new Request(publicUrl.toString(), { headers: { accept: "text/html" } });
+      const target = resolveUpstreamTarget(publicUrl, cfg);
+      const plan = await createSnapshotPlan(refreshRequest, publicUrl, target, cfg, "CN", env, { force: true });
+      if (!plan.store || !plan.key) throw new Error(plan.reason);
+      plan.canRefresh = true;
+      await refreshSnapshot(plan, refreshRequest, target, cfg);
+      results.push({ path: publicUrl.pathname, ok: true });
+    } catch (error) {
+      results.push({ path, ok: false, error: error && error.message ? error.message : "refresh-failed" });
+    }
+  }
+
+  return new Response(JSON.stringify({ ok: results.every((item) => item.ok), results }), {
+    status: results.every((item) => item.ok) ? 200 : 502,
+    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }
+  });
+}
+
+function parseSnapshotPaths(value) {
+  const paths = String(value).split(",")
+    .map((path) => path.trim())
+    .filter((path) => path.startsWith("/") && !path.startsWith("//"));
+  return paths.length ? paths.slice(0, 20) : ["/"];
 }
 
 function createCachePlan(request, reqUrl, target, cfg, country) {
@@ -319,6 +582,19 @@ function withCacheStatus(response, status, method, reason) {
   if (reason) headers.set(EDGEFLOW_CACHE_REASON_HEADER, reason);
   else headers.delete(EDGEFLOW_CACHE_REASON_HEADER);
   return new Response(method === "HEAD" ? null : response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
+
+function withSnapshotStatus(response, status, ageSeconds, refresh) {
+  const headers = new Headers(response.headers);
+  headers.set(EDGEFLOW_SNAPSHOT_HEADER, status);
+  headers.set(EDGEFLOW_SNAPSHOT_AGE_HEADER, String(ageSeconds));
+  if (refresh) headers.set("x-edgeflow-refresh", refresh);
+  else headers.delete("x-edgeflow-refresh");
+  return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
     headers

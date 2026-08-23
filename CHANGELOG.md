@@ -1,6 +1,18 @@
 # Changelog
 
-## [Unreleased] — v2.3.1
+## [Unreleased] — v2.4.0
+
+### EdgeOne 持久快照
+
+- **feat**: 使用 Makers KV 保存完成中国大陆改写后的 HTML 快照
+- **feat**: 快照过期时先返回旧内容，再通过 `context.waitUntil()` 后台刷新
+- **feat**: 增加受 `SNAPSHOT_REFRESH_SECRET` 保护的主动刷新端点
+- **feat**: 增加 `X-EdgeFlow-Snapshot`、快照年龄和后台刷新诊断头
+- **safety**: Cookie、Authorization、Range 和功能性查询参数绕过公共 HTML 快照
+- **fallback**: KV 未绑定、读取失败或回源刷新失败时保留现有 Cache API/最后成功快照路径
+- **test**: 增加 KV MISS/FRESH/STALE、后台刷新、查询归一化和刷新鉴权测试
+
+## [v2.3.1] — 2026-08-23
 
 ### EdgeOne 缓存与安全
 
