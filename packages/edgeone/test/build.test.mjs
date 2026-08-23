@@ -22,3 +22,14 @@ test("build emits standalone, syntax-valid handlers with full context", () => {
     assert.equal((source.match(/export async function handleProxyRequest/g) || []).length, 1);
   }
 });
+
+test("EdgeOne native cache configuration uses the supported Makers schema", () => {
+  const config = JSON.parse(readFileSync(new URL("../edgeone.json", import.meta.url), "utf8"));
+  assert.equal("cache" in config, false);
+  assert.deepEqual(config.caches, [
+    {
+      source: "/__eo_asset_v3__/*",
+      cacheTtl: 2592000
+    }
+  ]);
+});

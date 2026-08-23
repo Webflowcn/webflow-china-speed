@@ -1,8 +1,9 @@
 /**
- * Webflow China Speedup — EdgeOne Pages 代理核心逻辑 (v2.3)
+ * Webflow China Speedup — EdgeOne Pages 代理核心逻辑 (v2.3.1)
  *
  * ╔═══════════════════════════════════════════════════════════════╗
  * ║  改动记录                                                     ║
+ * ║  [v2.3.1] 修复原生缓存配置 + 过期元数据 + 回源计时           ║
  * ║  [v2.3] 显式 Cache API + 安全健康检查 + 可观测缓存状态       ║
  * ║  [v2.0] 修复 Geo 路由不生效 + 缓存不分地区 + Health 500      ║
  * ║  [v1.0] 初始版本                                             ║
@@ -71,6 +72,7 @@ function getClientCountry(request, context = {}) {
 }
 
 export async function handleProxyRequest(request, env = {}, context = {}) {
+  const requestStartedAt = monotonicNow();
   const reqUrl = new URL(request.url);
   const cfg = resolveSiteConfig(env);
 
@@ -82,18 +84,21 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
     const body = JSON.stringify({
       ok: true,
       runtime: "edgeone-pages",
-      version: "2.3.0",
+      version: "2.3.1",
       originConfigured: Boolean(cfg.originHost),
       cacheApiAvailable: Boolean(globalThis.caches && globalThis.caches.default)
     });
 
-    return withCacheStatus(new Response(body, {
+    return withServerTiming(withCacheStatus(new Response(body, {
       status: 200,
       headers: {
         "content-type": "application/json; charset=utf-8",
         "cache-control": "no-cache, no-store, must-revalidate"
       }
-    }), "BYPASS", request.method, "health");
+    }), "BYPASS", request.method, "health"), {
+      cacheStatus: "BYPASS",
+      totalMs: elapsedMs(requestStartedAt)
+    });
   }
 
   // Serve generated robots.txt and sitemap.xml
@@ -158,20 +163,35 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
   }
 
   const cachePlan = createCachePlan(request, reqUrl, target, cfg, country);
+  let cacheLookupMs = 0;
   if (cachePlan.lookup) {
+    const cacheLookupStartedAt = monotonicNow();
     try {
       const hit = await cachePlan.cache.match(cachePlan.key);
-      if (hit) return withCacheStatus(hit, "HIT", request.method, cachePlan.kind);
+      cacheLookupMs = elapsedMs(cacheLookupStartedAt);
+      if (hit) {
+        return withServerTiming(withCacheStatus(hit, "HIT", request.method, cachePlan.kind), {
+          cacheStatus: "HIT",
+          cacheLookupMs,
+          totalMs: elapsedMs(requestStartedAt)
+        });
+      }
     } catch (_cacheError) {
+      cacheLookupMs = elapsedMs(cacheLookupStartedAt);
       cachePlan.lookup = false;
-      cachePlan.store = false;
       cachePlan.reason = "cache-read-error";
+      if (typeof cachePlan.cache.delete === "function") {
+        try {
+          await cachePlan.cache.delete(cachePlan.key);
+        } catch (_cacheDeleteError) {}
+      }
     }
   }
 
   const upstreamHeaders = buildUpstreamHeaders(request, reqUrl, target.upstreamHost);
 
   let upstreamResp;
+  const originStartedAt = monotonicNow();
   try {
     upstreamResp = await fetch(target.upstreamUrl.toString(), {
       method: request.method,
@@ -182,27 +202,42 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
   } catch (_err) {
     return new Response("502 Upstream fetch failed", { status: 502 });
   }
+  const originMs = elapsedMs(originStartedAt);
 
+  const rewriteStartedAt = monotonicNow();
   const rewritten = await rewriteResponse(upstreamResp, reqUrl, request.method, target, cfg);
+  const rewriteMs = elapsedMs(rewriteStartedAt);
   const storeDecision = canStoreResponse(rewritten, cachePlan);
 
   if (storeDecision.store) {
     const cachedResponse = rewritten.clone();
-    const putTask = cachePlan.cache.put(cachePlan.key, cachedResponse);
+    const putTask = Promise.resolve(cachePlan.cache.put(cachePlan.key, cachedResponse)).catch(() => undefined);
     if (context && typeof context.waitUntil === "function") {
       context.waitUntil(putTask);
     } else {
       await putTask;
     }
-    return withCacheStatus(rewritten, "MISS", request.method, cachePlan.kind);
+    return withServerTiming(withCacheStatus(rewritten, "MISS", request.method, cachePlan.kind), {
+      cacheStatus: "MISS",
+      cacheLookupMs,
+      originMs,
+      rewriteMs,
+      totalMs: elapsedMs(requestStartedAt)
+    });
   }
 
-  return withCacheStatus(
+  return withServerTiming(withCacheStatus(
     rewritten,
     "BYPASS",
     request.method,
     storeDecision.reason || cachePlan.reason
-  );
+  ), {
+    cacheStatus: "BYPASS",
+    cacheLookupMs,
+    originMs,
+    rewriteMs,
+    totalMs: elapsedMs(requestStartedAt)
+  });
 }
 
 function resolveSiteConfig(env) {
@@ -290,6 +325,35 @@ function withCacheStatus(response, status, method, reason) {
   });
 }
 
+function withServerTiming(response, timings) {
+  const headers = new Headers(response.headers);
+  const values = [`edgeflow-cache;desc="${timings.cacheStatus}"`];
+  if (Number.isFinite(timings.cacheLookupMs)) values.push(`cache;dur=${formatDuration(timings.cacheLookupMs)}`);
+  if (Number.isFinite(timings.originMs)) values.push(`origin;dur=${formatDuration(timings.originMs)}`);
+  if (Number.isFinite(timings.rewriteMs)) values.push(`rewrite;dur=${formatDuration(timings.rewriteMs)}`);
+  values.push(`total;dur=${formatDuration(timings.totalMs)}`);
+  headers.set("server-timing", values.join(", "));
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
+
+function monotonicNow() {
+  return globalThis.performance && typeof globalThis.performance.now === "function"
+    ? globalThis.performance.now()
+    : Date.now();
+}
+
+function elapsedMs(startedAt) {
+  return Math.max(0, monotonicNow() - startedAt);
+}
+
+function formatDuration(value) {
+  return Math.max(0, value || 0).toFixed(1);
+}
+
 function parsePositiveInt(value, fallback) {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -321,6 +385,7 @@ async function rewriteResponse(originResp, requestUrl, method, target, cfg) {
   rewriteLocationHeader(headers, requestUrl, cfg);
   rewriteLinkHeader(headers, requestUrl, cfg);
   dropUnsafeUpstreamHeaders(headers, requestUrl.host);
+  if (shouldRewriteBodyText || isCompressed) dropChangedRepresentationHeaders(headers);
 
   // MIME override: .txt files through asset proxy are often JS code
   if (target.assetProxy && target.sourcePathname.endsWith('.txt') && contentType === 'text/plain') {
@@ -398,7 +463,10 @@ function dropUnsafeUpstreamHeaders(headers, publicHost) {
     "x-wf-region",
     "x-wf-accelerated",
     "cf-ray",
-    "cf-cache-status"
+    "cf-cache-status",
+    "age",
+    "expires",
+    "server-timing"
   ].forEach((key) => headers.delete(key));
 
   // Cloudflare's upstream tracking cookie is scoped to the origin domain and
@@ -420,6 +488,16 @@ function dropUnsafeUpstreamHeaders(headers, publicHost) {
       headers.delete("set-cookie");
     }
   }
+}
+
+function dropChangedRepresentationHeaders(headers) {
+  [
+    "etag",
+    "content-md5",
+    "digest",
+    "content-digest",
+    "repr-digest"
+  ].forEach((key) => headers.delete(key));
 }
 
 function normalizeTransferHeaders(headers) {

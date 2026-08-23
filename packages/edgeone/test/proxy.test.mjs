@@ -23,6 +23,10 @@ class MemoryCache {
   async put(request, response) {
     this.items.set(this.key(request), response.clone());
   }
+
+  async delete(request) {
+    return this.items.delete(this.key(request));
+  }
 }
 
 function createContext(country = "CN") {
@@ -170,7 +174,7 @@ test("health response is minimal and contains no request or runtime dump", async
   ]);
   assert.equal(JSON.stringify(body).includes("203.0.113.8"), false);
   assert.equal(JSON.stringify(body).includes("private=value"), false);
-  assert.equal(body.version, "2.3.0");
+  assert.equal(body.version, "2.3.1");
   assert.equal(body.cacheApiAvailable, true);
   assert.equal(response.headers.get("x-edgeflow-cache"), "BYPASS");
 });
@@ -345,6 +349,59 @@ test("fingerprinted assets get a long immutable edge TTL", async () => {
   assert.equal(response.headers.get("x-edgeflow-cache"), "MISS");
   assert.match(response.headers.get("cache-control"), /s-maxage=2592000/);
   assert.match(response.headers.get("cache-control"), /immutable/);
+});
+
+test("rewritten responses reset stale upstream cache metadata and expose safe timing", async () => {
+  globalThis.fetch = async () => htmlResponse("<html><body>fresh proxy representation</body></html>", {
+    headers: {
+      age: "7628",
+      etag: '"upstream-compressed-etag"',
+      expires: "Wed, 21 Oct 2015 07:28:00 GMT",
+      "content-md5": "invalid-after-rewrite",
+      "server-timing": "upstream;dur=999"
+    }
+  });
+
+  const context = createContext();
+  const request = new Request("https://proxy.example.com/");
+  const response = await handleProxyRequest(request, { WEBFLOW_HOST: "origin.example.com" }, context);
+  assert.equal(response.headers.get("age"), null);
+  assert.equal(response.headers.get("etag"), null);
+  assert.equal(response.headers.get("expires"), null);
+  assert.equal(response.headers.get("content-md5"), null);
+  assert.match(response.headers.get("server-timing"), /edgeflow-cache;desc="MISS"/);
+  assert.match(response.headers.get("server-timing"), /origin;dur=/);
+  assert.match(response.headers.get("server-timing"), /rewrite;dur=/);
+  assert.doesNotMatch(response.headers.get("server-timing"), /upstream/);
+});
+
+test("an expired cache read can recover by fetching and storing a fresh response", async () => {
+  let fetchCount = 0;
+  let firstMatch = true;
+  const cache = new MemoryCache();
+  const originalMatch = cache.match.bind(cache);
+  cache.match = async (request) => {
+    if (firstMatch) {
+      firstMatch = false;
+      throw new Error("504 expired cache entry");
+    }
+    return originalMatch(request);
+  };
+  globalThis.caches = { default: cache };
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    return htmlResponse("fresh");
+  };
+
+  const context = createContext();
+  const request = new Request("https://proxy.example.com/recover");
+  const refreshed = await handleProxyRequest(request, { WEBFLOW_HOST: "origin.example.com" }, context);
+  assert.equal(refreshed.headers.get("x-edgeflow-cache"), "MISS");
+  await settle(context);
+
+  const hit = await handleProxyRequest(request, { WEBFLOW_HOST: "origin.example.com" }, context);
+  assert.equal(hit.headers.get("x-edgeflow-cache"), "HIT");
+  assert.equal(fetchCount, 1);
 });
 
 test("missing Cache API degrades safely to BYPASS", async () => {

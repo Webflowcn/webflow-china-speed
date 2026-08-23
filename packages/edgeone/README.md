@@ -48,7 +48,8 @@ EdgeOne 路径不需要存储桶，但节点 Cache API **不等同于 R2 持久�
 | v1.0 | 初始版本 |
 | v2.0 | 修复 Geo 路由、Health 端点、缓存地区分离 |
 | v2.1 | 目录整合（`edgeone-optimized` 合并到 `edgeone`）、更新新功能文档 |
-| v2.3（待发布） | 修复构建、显式 Cache API、最小健康检查、Link 头重写、缓存测试 |
+| v2.3 | 修复构建、显式 Cache API、最小健康检查、Link 头重写、缓存测试 |
+| v2.3.1 | 修复 Makers 原生缓存 schema、过期元数据、缓存自愈与分阶段计时 |
 
 ## v2.0 修复内容
 
@@ -56,7 +57,7 @@ EdgeOne 路径不需要存储桶，但节点 Cache API **不等同于 R2 持久�
 |---|------|---------|
 | 1 | Geo 路由不生效 | 改用 `getClientCountry()` 多 header fallback，不再只依赖 `EO-Client-IPCountry` |
 | 2 | Health 端点 500 | 不用 `Response.json()`，改用 `new Response(JSON.stringify())` |
-| 3 | 缓存不分地区 | 响应增加 `Vary: EO-Client-IPCountry`，`edgeone.json` 所有规则增加 `varyByHeader` |
+| 3 | 缓存不分地区 | 响应增加地区 `Vary`；v2.3.1 移除未受 Makers schema 支持的 `varyByHeader`，原生长缓存只用于代理资源路径 |
 | 4 | stale 过期太长 | 从 604800(7天) 降至 3600(1小时) |
 
 ## 部署步骤
@@ -103,13 +104,14 @@ npm run audit:live -- https://你的域名
 部署后访问 `https://你的域名/__proxy/health`，应看到：
 
 ```json
-{"ok":true,"runtime":"edgeone-pages","version":"2.3.0","originConfigured":true,"cacheApiAvailable":true}
+{"ok":true,"runtime":"edgeone-pages","version":"2.3.1","originConfigured":true,"cacheApiAvailable":true}
 ```
 
 - 用美国代理访问 → 应 301 重定向到 `webflowcn.webflow.io`
 - 直连访问（CN）→ 正常显示，资源走国内 CDN
 - 连续访问同一公开页面 → 首次应为 `MISS`，同节点后续请求应为 `HIT`
 - 带 Cookie 或 Authorization 访问 → 必须为 `BYPASS`
+- 查看 `Server-Timing` → 可分别检查 cache、origin、rewrite 与 total 耗时
 
 ## 环境变量
 

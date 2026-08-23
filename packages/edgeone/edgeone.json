@@ -9,75 +9,15 @@
         },
         {
           "key": "X-Proxy-Version",
-          "value": "webflow-china-speedup/2.3.0"
+          "value": "webflow-china-speedup/2.3.1"
         }
       ]
     }
   ],
-  "cache": [
+  "caches": [
     {
       "source": "/__eo_asset_v3__/*",
-      "ttl": 2592000
-    },
-    {
-      "source": "/*.js",
-      "ttl": 604800,
-      "varyByHeader": ["EO-Client-IPCountry"]
-    },
-    {
-      "source": "/*.css",
-      "ttl": 604800,
-      "varyByHeader": ["EO-Client-IPCountry"]
-    },
-    {
-      "source": "/*.png",
-      "ttl": 2592000,
-      "varyByHeader": ["EO-Client-IPCountry"]
-    },
-    {
-      "source": "/*.jpg",
-      "ttl": 2592000,
-      "varyByHeader": ["EO-Client-IPCountry"]
-    },
-    {
-      "source": "/*.jpeg",
-      "ttl": 2592000,
-      "varyByHeader": ["EO-Client-IPCountry"]
-    },
-    {
-      "source": "/*.gif",
-      "ttl": 2592000,
-      "varyByHeader": ["EO-Client-IPCountry"]
-    },
-    {
-      "source": "/*.webp",
-      "ttl": 2592000,
-      "varyByHeader": ["EO-Client-IPCountry"]
-    },
-    {
-      "source": "/*.svg",
-      "ttl": 2592000,
-      "varyByHeader": ["EO-Client-IPCountry"]
-    },
-    {
-      "source": "/*.ico",
-      "ttl": 2592000,
-      "varyByHeader": ["EO-Client-IPCountry"]
-    },
-    {
-      "source": "/*.woff2",
-      "ttl": 2592000,
-      "varyByHeader": ["EO-Client-IPCountry"]
-    },
-    {
-      "source": "/*.woff",
-      "ttl": 2592000,
-      "varyByHeader": ["EO-Client-IPCountry"]
-    },
-    {
-      "source": "/*.ttf",
-      "ttl": 2592000,
-      "varyByHeader": ["EO-Client-IPCountry"]
+      "cacheTtl": 2592000
     }
   ]
 }

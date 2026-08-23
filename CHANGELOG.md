@@ -1,8 +1,14 @@
 # Changelog
 
-## [Unreleased] — v2.3
+## [Unreleased] — v2.3.1
 
 ### EdgeOne 缓存与安全
+
+- **fix**: 将 Makers 原生缓存配置改为官方 `caches` + `cacheTtl` schema，移除未受支持的字段
+- **fix**: 清除上游 `Age`、`Expires` 及改写后失效的 ETag/摘要头，避免新响应立即过期
+- **fix**: Cache API 读取过期或异常后允许回源并重新写入，恢复缓存自愈能力
+- **feat**: 增加安全的 `Server-Timing`，区分 cache lookup、origin、rewrite 和 total 耗时
+- **test**: 增加原生缓存 schema、过期元数据、计时头和缓存异常恢复覆盖
 
 - **fix**: 修复构建产物重复声明 `handleProxyRequest`，并保留完整 EdgeOne `context`
 - **feat**: 使用 `caches.default` + `context.waitUntil()` 实现显式缓存
