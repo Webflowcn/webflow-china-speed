@@ -131,8 +131,22 @@ async function main() {
   console.log(JSON.stringify(result, null, 2));
   await cdp.close();
   } finally {
-    if (!chrome.killed) chrome.kill("SIGTERM");
-    await rm(profileDir, { recursive: true, force: true });
+    await stopChrome(chrome);
+    await rm(profileDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
+
+async function stopChrome(chrome) {
+  if (chrome.exitCode !== null || chrome.signalCode !== null) return;
+
+  const exited = new Promise((resolve) => chrome.once("exit", resolve));
+  chrome.kill("SIGTERM");
+  await Promise.race([exited, delay(2000)]);
+
+  if (chrome.exitCode === null && chrome.signalCode === null) {
+    const forcedExit = new Promise((resolve) => chrome.once("exit", resolve));
+    chrome.kill("SIGKILL");
+    await forcedExit;
   }
 }
 
