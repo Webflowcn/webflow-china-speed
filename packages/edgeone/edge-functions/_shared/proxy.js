@@ -1,8 +1,9 @@
 /**
- * Webflow China Speedup — EdgeOne Makers 代理核心逻辑 (v2.4.0)
+ * Webflow China Speedup — EdgeOne Makers 代理核心逻辑 (v2.5.0)
  *
  * ╔═══════════════════════════════════════════════════════════════╗
  * ║  改动记录                                                     ║
+ * ║  [v2.5.0] Blob 备用 HTML 快照 + 依赖打包                     ║
  * ║  [v2.4.0] KV 持久 HTML 快照 + 后台刷新 + 故障回退           ║
  * ║  [v2.3.1] 修复原生缓存配置 + 过期元数据 + 回源计时           ║
  * ║  [v2.3] 显式 Cache API + 安全健康检查 + 可观测缓存状态       ║
@@ -12,6 +13,8 @@
  *
  *  edge-functions/ 是 EdgeOne Makers 当前使用的函数源码目录。
  */
+
+import { getStore as getBlobStore } from "@edgeone/pages-blob";
 
 const DEFAULT_CONFIG = {
   originHost: "webflowcn.webflow.io",
@@ -44,8 +47,10 @@ const EDGEFLOW_CACHE_HEADER = "x-edgeflow-cache";
 const EDGEFLOW_CACHE_REASON_HEADER = "x-edgeflow-cache-reason";
 const EDGEFLOW_SNAPSHOT_HEADER = "x-edgeflow-snapshot";
 const EDGEFLOW_SNAPSHOT_AGE_HEADER = "x-edgeflow-snapshot-age";
+const EDGEFLOW_SNAPSHOT_STORE_HEADER = "x-edgeflow-snapshot-store";
 const SNAPSHOT_SCHEMA_VERSION = 1;
 const TRACKING_QUERY_RE = /^(?:utm_[a-z0-9_]+|fbclid|gclid|msclkid)$/i;
+const EDGEONE_ACCESS_COOKIE_NAMES = new Set(["eo_token", "eo_time"]);
 const activeSnapshotRefreshes = new Map();
 
 /**
@@ -87,13 +92,15 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
   // (EdgeOne 运行时可能不支持 Response.json()，导致 500)
   // ════════════════════════════════════════════════════════════
   if (reqUrl.pathname === "/__proxy/health") {
+    const snapshotBackend = resolveSnapshotBackend(env);
     const body = JSON.stringify({
       ok: true,
       runtime: "edgeone-pages",
-      version: "2.4.0",
+      version: "2.5.0",
       originConfigured: Boolean(cfg.originHost),
       cacheApiAvailable: Boolean(globalThis.caches && globalThis.caches.default),
-      snapshotStoreAvailable: Boolean(resolveSnapshotStore(env))
+      snapshotStoreAvailable: Boolean(snapshotBackend),
+      snapshotStoreType: snapshotBackend?.type || null
     });
 
     return withServerTiming(withCacheStatus(new Response(body, {
@@ -192,7 +199,8 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
           withCacheStatus(snapshotResponse, "HIT", request.method, stale ? "snapshot-stale" : "snapshot-fresh"),
           stale ? "STALE" : "FRESH",
           ageSeconds,
-          stale ? "BACKGROUND" : ""
+          stale ? "BACKGROUND" : "",
+          snapshotPlan.backend
         ), {
           cacheStatus: "HIT",
           cacheLookupMs: snapshotLookupMs,
@@ -270,7 +278,7 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
     }
     const missResponse = withCacheStatus(rewritten, "MISS", request.method, cachePlan.kind);
     return withServerTiming(snapshotDecision.store
-      ? withSnapshotStatus(missResponse, "MISS", 0, "")
+      ? withSnapshotStatus(missResponse, "MISS", 0, "", snapshotPlan.backend)
       : missResponse, {
       cacheStatus: "MISS",
       cacheLookupMs: cacheLookupMs + snapshotLookupMs,
@@ -285,7 +293,8 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
       withCacheStatus(rewritten, "MISS", request.method, "snapshot"),
       "MISS",
       0,
-      ""
+      "",
+      snapshotPlan.backend
     ), {
       cacheStatus: "MISS",
       cacheLookupMs: snapshotLookupMs,
@@ -325,13 +334,15 @@ function resolveSiteConfig(env) {
 
 async function createSnapshotPlan(request, reqUrl, target, cfg, country, env, options = {}) {
   const method = request.method.toUpperCase();
-  const store = resolveSnapshotStore(env);
+  const snapshotBackend = resolveSnapshotBackend(env);
+  const store = snapshotBackend?.store || null;
   const base = {
     lookup: false,
     canRefresh: false,
     store: null,
     key: null,
     ttl: cfg.snapshotTtl,
+    backend: snapshotBackend?.type || "",
     reason: "snapshot-unavailable",
     requestUrl: null
   };
@@ -341,7 +352,9 @@ async function createSnapshotPlan(request, reqUrl, target, cfg, country, env, op
   if (!options.force && country !== "CN") return { ...base, store, reason: country ? "snapshot-geo" : "snapshot-geo-unknown" };
   if (target.assetProxy || classifyCacheKind(target) !== "html") return { ...base, store, reason: "snapshot-non-html" };
   if (request.headers.get("authorization")) return { ...base, store, reason: "snapshot-authorization" };
-  if (request.headers.get("cookie")) return { ...base, store, reason: "snapshot-cookie" };
+  if (hasPersonalizationCookies(request.headers.get("cookie"))) {
+    return { ...base, store, reason: "snapshot-cookie" };
+  }
   if (request.headers.get("range")) return { ...base, store, reason: "snapshot-range" };
 
   const normalizedUrl = normalizeSnapshotUrl(reqUrl);
@@ -358,11 +371,38 @@ async function createSnapshotPlan(request, reqUrl, target, cfg, country, env, op
   };
 }
 
-function resolveSnapshotStore(env = {}) {
+function resolveSnapshotBackend(env = {}) {
+  const kvStore = resolveKvSnapshotStore(env);
+  if (kvStore) return { type: "kv", store: kvStore };
+
+  const injectedBlobStore = env.EDGEFLOW_BLOB_STORE || globalThis.EDGEFLOW_BLOB_STORE;
+  if (injectedBlobStore) return { type: "blob", store: createBlobSnapshotAdapter(injectedBlobStore) };
+
+  const blobStoreName = String(env.SNAPSHOT_BLOB_STORE || "").trim();
+  if (!blobStoreName) return null;
+  try {
+    return { type: "blob", store: createBlobSnapshotAdapter(getBlobStore(blobStoreName)) };
+  } catch (_blobConfigError) {
+    return null;
+  }
+}
+
+function resolveKvSnapshotStore(env = {}) {
   if (env.EDGEFLOW_SNAPSHOT) return env.EDGEFLOW_SNAPSHOT;
   if (typeof EDGEFLOW_SNAPSHOT !== "undefined") return EDGEFLOW_SNAPSHOT;
   if (globalThis.EDGEFLOW_SNAPSHOT) return globalThis.EDGEFLOW_SNAPSHOT;
   return null;
+}
+
+function createBlobSnapshotAdapter(store) {
+  return {
+    get(key, options) {
+      return store.get(`snapshots/${key}`, options);
+    },
+    put(key, value) {
+      return store.set(`snapshots/${key}`, value);
+    }
+  };
 }
 
 function normalizeSnapshotUrl(inputUrl) {
@@ -434,6 +474,7 @@ async function storeSnapshot(snapshotPlan, response) {
   headers.delete(EDGEFLOW_CACHE_REASON_HEADER);
   headers.delete(EDGEFLOW_SNAPSHOT_HEADER);
   headers.delete(EDGEFLOW_SNAPSHOT_AGE_HEADER);
+  headers.delete(EDGEFLOW_SNAPSHOT_STORE_HEADER);
   const record = {
     version: SNAPSHOT_SCHEMA_VERSION,
     storedAt: Date.now(),
@@ -529,7 +570,7 @@ function createCachePlan(request, reqUrl, target, cfg, country) {
   if (method !== "GET" && method !== "HEAD") return { ...base, reason: "method" };
   if (country !== "CN") return { ...base, reason: country ? "geo" : "geo-unknown" };
   if (request.headers.get("authorization")) return { ...base, reason: "authorization" };
-  if (request.headers.get("cookie")) return { ...base, reason: "cookie" };
+  if (hasPersonalizationCookies(request.headers.get("cookie"))) return { ...base, reason: "cookie" };
   if (request.headers.get("range")) return { ...base, reason: "range" };
 
   const requestCacheControl = (request.headers.get("cache-control") || "").toLowerCase();
@@ -588,10 +629,12 @@ function withCacheStatus(response, status, method, reason) {
   });
 }
 
-function withSnapshotStatus(response, status, ageSeconds, refresh) {
+function withSnapshotStatus(response, status, ageSeconds, refresh, storeType = "") {
   const headers = new Headers(response.headers);
   headers.set(EDGEFLOW_SNAPSHOT_HEADER, status);
   headers.set(EDGEFLOW_SNAPSHOT_AGE_HEADER, String(ageSeconds));
+  if (storeType) headers.set(EDGEFLOW_SNAPSHOT_STORE_HEADER, storeType);
+  else headers.delete(EDGEFLOW_SNAPSHOT_STORE_HEADER);
   if (refresh) headers.set("x-edgeflow-refresh", refresh);
   else headers.delete("x-edgeflow-refresh");
   return new Response(response.body, {
@@ -637,11 +680,37 @@ function parsePositiveInt(value, fallback) {
 
 function buildUpstreamHeaders(request, reqUrl, upstreamHost) {
   const headers = new Headers(request.headers);
+  const upstreamCookie = stripEdgeOneAccessCookies(headers.get("cookie"));
+  if (upstreamCookie) headers.set("cookie", upstreamCookie);
+  else headers.delete("cookie");
   headers.set("host", upstreamHost);
   headers.set("x-forwarded-host", reqUrl.host);
   headers.set("x-forwarded-proto", reqUrl.protocol.replace(":", ""));
   headers.set("accept-encoding", "identity");
   return headers;
+}
+
+function hasPersonalizationCookies(cookieHeader) {
+  return parseCookiePairs(cookieHeader).some(({ name }) => !EDGEONE_ACCESS_COOKIE_NAMES.has(name));
+}
+
+function stripEdgeOneAccessCookies(cookieHeader) {
+  return parseCookiePairs(cookieHeader)
+    .filter(({ name }) => !EDGEONE_ACCESS_COOKIE_NAMES.has(name))
+    .map(({ pair }) => pair)
+    .join("; ");
+}
+
+function parseCookiePairs(cookieHeader) {
+  if (!cookieHeader) return [];
+  return String(cookieHeader).split(";")
+    .map((pair) => pair.trim())
+    .filter(Boolean)
+    .map((pair) => {
+      const separator = pair.indexOf("=");
+      const rawName = separator === -1 ? pair : pair.slice(0, separator);
+      return { name: rawName.trim().toLowerCase(), pair };
+    });
 }
 
 function canHaveBody(method) {

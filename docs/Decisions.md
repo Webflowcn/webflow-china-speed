@@ -12,13 +12,13 @@
 
  ---
 
- ## ADR-002: 边缘函数内联打包（EdgeOne）
+ ## ADR-002: 边缘函数依赖打包（EdgeOne）
 
- **决策**: `build.mjs` 将 `proxy.js` 内联进入口文件，而非使用 npm 包管理。
+ **决策**: `build.mjs` 使用 esbuild 将入口、`proxy.js` 和运行时依赖打成单文件 ESM。
 
- **背景**: EdgeOne Pages 的构建环境不支持 `npm install`，所有代码必须在一个文件或预构建产物中。
+ **背景**: EdgeOne CLI 直传需要可独立运行的单文件产物；v2.5 又需要引入官方 `@edgeone/pages-blob` SDK，字符串拼接无法正确处理 CommonJS 包和部署凭证占位符。
 
- **结果**: `build.mjs` 读取 `edge-functions/_shared/proxy.js`，将其内联到 `index.js` 和 `[[default]].js` 两个入口文件。构建产物输出到 `.edgeone/edge-functions/`。
+ **结果**: `build.mjs` 分别从 `index.js` 和 `[[default]].js` 构建，完整打包到 `.edgeone/edge-functions/`。产物不保留外部 npm import，并保留 Makers 部署阶段识别的 Blob 凭证占位符。
 
  ---
 
@@ -61,6 +61,18 @@
  **背景**: Cloudflare Workers 提供 `HTMLRewriter` API，可以在流式传输 HTML 时实时改写，无需等待完整响应。EdgeOne Edge Functions 不提供等效 API。
 
  **结果**: CF Worker 的流式改写延迟更低、内存占用更少。EdgeOne 的全量替换实现更简单，且对 EdgeOne 的国内节点来说延迟差异可忽略。
+
+ ---
+
+ ## ADR-007: Blob 只作为显式备用快照后端
+
+ **决策**: 只有设置 `SNAPSHOT_BLOB_STORE` 时才启用 Makers Blob；KV 与 Blob 同时存在时只使用 KV。
+
+ **背景**: KV 需要申请审核，而正式部署中的 `caches.default` 线上连续请求仍全部 MISS。Blob 可由官方 SDK自动创建 Store，并通过边缘节点加速读取，但需要部署阶段凭证注入。
+
+**结果**: 持久后端顺序固定为 KV → Blob → Cache API → 实时回源。Blob 对象放在 `snapshots/` 前缀下；不默认创建、不双写，也不把 Blob 用作公网 CDN。
+
+**运行时验证**: 独立预览项目首次 HTML 请求已观测到 `MISS + blob`，随后请求为 `HIT + FRESH + blob`。为避免预览门禁本身导致误判，只将 EdgeOne 的 `eo_token` / `eo_time` 视为平台门禁并在回源前剥离；任何其他 Cookie 仍绕过缓存。Blob 解决了 HTML 的跨请求持久命中，但静态资源仍依赖 Cache API，冷浏览器复测持续 MISS，因此不能把 Blob 成功解释为整页所有资源均已加速。
 
 
 ---

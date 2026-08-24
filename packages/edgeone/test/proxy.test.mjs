@@ -6,6 +6,7 @@ import { handleProxyRequest } from "../edge-functions/_shared/proxy.js";
 const originalFetch = globalThis.fetch;
 const originalCaches = globalThis.caches;
 const originalSnapshotStore = globalThis.EDGEFLOW_SNAPSHOT;
+const originalBlobStore = globalThis.EDGEFLOW_BLOB_STORE;
 
 class MemoryCache {
   constructor() {
@@ -51,6 +52,22 @@ class MemoryKv {
   }
 }
 
+class MemoryBlob {
+  constructor() {
+    this.items = new Map();
+  }
+
+  async get(key, options) {
+    const value = this.items.get(key);
+    if (value == null) return null;
+    return options?.type === "json" ? JSON.parse(value) : value;
+  }
+
+  async set(key, value) {
+    this.items.set(key, String(value));
+  }
+}
+
 function createContext(country = "CN") {
   const tasks = [];
   return {
@@ -75,6 +92,7 @@ function htmlResponse(body = "<html><body>ok</body></html>", init = {}) {
 beforeEach(() => {
   globalThis.caches = { default: new MemoryCache() };
   delete globalThis.EDGEFLOW_SNAPSHOT;
+  delete globalThis.EDGEFLOW_BLOB_STORE;
 });
 
 afterEach(() => {
@@ -82,6 +100,8 @@ afterEach(() => {
   globalThis.caches = originalCaches;
   if (originalSnapshotStore === undefined) delete globalThis.EDGEFLOW_SNAPSHOT;
   else globalThis.EDGEFLOW_SNAPSHOT = originalSnapshotStore;
+  if (originalBlobStore === undefined) delete globalThis.EDGEFLOW_BLOB_STORE;
+  else globalThis.EDGEFLOW_BLOB_STORE = originalBlobStore;
 });
 
 test("public CN HTML is cached with observable MISS then HIT", async () => {
@@ -134,6 +154,61 @@ test("Cookie and Authorization requests bypass cache", async () => {
   assert.equal(authResponse.headers.get("x-edgeflow-cache"), "BYPASS");
   assert.equal(authResponse.headers.get("x-edgeflow-cache-reason"), "authorization");
   assert.equal(fetchCount, 2);
+});
+
+test("EdgeOne access-gate cookies do not disable public caching or reach upstream", async () => {
+  let fetchCount = 0;
+  let upstreamCookie = "not-observed";
+  globalThis.fetch = async (_url, init) => {
+    fetchCount += 1;
+    upstreamCookie = init.headers.get("cookie");
+    return htmlResponse("<html><body>protected preview</body></html>");
+  };
+
+  const context = createContext();
+  const blob = new MemoryBlob();
+  const request = new Request("https://proxy.example.com/", {
+    headers: { cookie: "eo_token=preview-token; eo_time=123456" }
+  });
+  const first = await handleProxyRequest(
+    request,
+    { WEBFLOW_HOST: "origin.example.com", EDGEFLOW_BLOB_STORE: blob },
+    context
+  );
+  assert.equal(first.headers.get("x-edgeflow-cache"), "MISS");
+  assert.equal(first.headers.get("x-edgeflow-snapshot"), "MISS");
+  assert.equal(first.headers.get("x-edgeflow-snapshot-store"), "blob");
+  assert.equal(upstreamCookie, null);
+  await settle(context);
+
+  const second = await handleProxyRequest(
+    request,
+    { WEBFLOW_HOST: "origin.example.com", EDGEFLOW_BLOB_STORE: blob },
+    context
+  );
+  assert.equal(second.headers.get("x-edgeflow-cache"), "HIT");
+  assert.equal(second.headers.get("x-edgeflow-snapshot"), "FRESH");
+  assert.equal(second.headers.get("x-edgeflow-snapshot-store"), "blob");
+  assert.equal(fetchCount, 1);
+});
+
+test("EdgeOne access-gate cookies do not hide a real session cookie", async () => {
+  let upstreamCookie = "";
+  globalThis.fetch = async (_url, init) => {
+    upstreamCookie = init.headers.get("cookie");
+    return htmlResponse();
+  };
+
+  const response = await handleProxyRequest(
+    new Request("https://proxy.example.com/account", {
+      headers: { cookie: "eo_token=preview-token; session=private; eo_time=123456" }
+    }),
+    { WEBFLOW_HOST: "origin.example.com" },
+    createContext()
+  );
+  assert.equal(response.headers.get("x-edgeflow-cache"), "BYPASS");
+  assert.equal(response.headers.get("x-edgeflow-cache-reason"), "cookie");
+  assert.equal(upstreamCookie, "session=private");
 });
 
 test("POST and non-200 responses are never cached", async () => {
@@ -196,13 +271,15 @@ test("health response is minimal and contains no request or runtime dump", async
     "originConfigured",
     "runtime",
     "snapshotStoreAvailable",
+    "snapshotStoreType",
     "version"
   ]);
   assert.equal(JSON.stringify(body).includes("203.0.113.8"), false);
   assert.equal(JSON.stringify(body).includes("private=value"), false);
-  assert.equal(body.version, "2.4.0");
+  assert.equal(body.version, "2.5.0");
   assert.equal(body.cacheApiAvailable, true);
   assert.equal(body.snapshotStoreAvailable, false);
+  assert.equal(body.snapshotStoreType, null);
   assert.equal(response.headers.get("x-edgeflow-cache"), "BYPASS");
 });
 
@@ -465,6 +542,65 @@ test("KV snapshot persists rewritten HTML when Cache API is unavailable", async 
   assert.equal(second.headers.get("x-edgeflow-snapshot"), "FRESH");
   assert.equal(await second.text(), await first.text());
   assert.equal(fetchCount, 1);
+});
+
+test("Blob fallback persists rewritten HTML when KV and Cache API are unavailable", async () => {
+  globalThis.caches = undefined;
+  const blob = new MemoryBlob();
+  globalThis.EDGEFLOW_BLOB_STORE = blob;
+  let fetchCount = 0;
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    return htmlResponse("<html><body>blob snapshot</body></html>");
+  };
+
+  const context = createContext();
+  const request = new Request("https://proxy.example.com/");
+  const first = await handleProxyRequest(request, { WEBFLOW_HOST: "origin.example.com" }, context);
+  assert.equal(first.headers.get("x-edgeflow-cache"), "MISS");
+  assert.equal(first.headers.get("x-edgeflow-snapshot"), "MISS");
+  assert.equal(first.headers.get("x-edgeflow-snapshot-store"), "blob");
+  await settle(context);
+  assert.equal([...blob.items.keys()].every((key) => key.startsWith("snapshots/html_")), true);
+
+  const second = await handleProxyRequest(request, { WEBFLOW_HOST: "origin.example.com" }, createContext());
+  assert.equal(second.headers.get("x-edgeflow-cache"), "HIT");
+  assert.equal(second.headers.get("x-edgeflow-cache-reason"), "snapshot-fresh");
+  assert.equal(second.headers.get("x-edgeflow-snapshot"), "FRESH");
+  assert.equal(second.headers.get("x-edgeflow-snapshot-store"), "blob");
+  assert.match(await second.text(), /blob snapshot/);
+  assert.equal(fetchCount, 1);
+});
+
+test("KV remains the preferred snapshot backend when Blob is also configured", async () => {
+  globalThis.caches = undefined;
+  const kv = new MemoryKv();
+  const blob = new MemoryBlob();
+  globalThis.EDGEFLOW_SNAPSHOT = kv;
+  globalThis.EDGEFLOW_BLOB_STORE = blob;
+  globalThis.fetch = async () => htmlResponse("<html><body>kv wins</body></html>");
+
+  const context = createContext();
+  const response = await handleProxyRequest(
+    new Request("https://proxy.example.com/"),
+    { WEBFLOW_HOST: "origin.example.com" },
+    context
+  );
+  assert.equal(response.headers.get("x-edgeflow-snapshot-store"), "kv");
+  await settle(context);
+  assert.equal(kv.items.size, 1);
+  assert.equal(blob.items.size, 0);
+});
+
+test("invalid Blob store configuration degrades without breaking health", async () => {
+  const response = await handleProxyRequest(
+    new Request("https://proxy.example.com/__proxy/health"),
+    { WEBFLOW_HOST: "origin.example.com", SNAPSHOT_BLOB_STORE: "invalid/name" },
+    createContext()
+  );
+  const body = await response.json();
+  assert.equal(body.snapshotStoreAvailable, false);
+  assert.equal(body.snapshotStoreType, null);
 });
 
 test("stale KV snapshot is served immediately and refreshed in background", async () => {

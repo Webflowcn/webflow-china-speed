@@ -1,6 +1,6 @@
 {
   "name": "reverse-proxy-edgeone-v2",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,6 +9,10 @@
     "test:local": "npm test",
     "audit:live": "node scripts/browser-audit.mjs"
   },
-  "devDependencies": {},
-  "dependencies": {}
+  "dependencies": {
+    "@edgeone/pages-blob": "^0.0.16"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.9"
+  }
 }

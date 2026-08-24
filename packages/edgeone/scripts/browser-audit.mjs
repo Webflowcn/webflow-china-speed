@@ -7,133 +7,222 @@ async function main() {
   const args = process.argv.slice(2);
   const targetUrl = args.find((arg) => !arg.startsWith("--"));
   const proxyArg = args.find((arg) => arg.startsWith("--proxy-server="));
+  const direct = args.includes("--direct");
+  const disableBrowserCache = args.includes("--disable-browser-cache");
+  const runs = parseIntegerArg(args, "--runs=", 3, 1, 10);
+  const settleMs = parseIntegerArg(args, "--settle-ms=", 1500, 0, 10000);
+  const injectedCookies = parseAuditCookies(process.env.EDGEFLOW_AUDIT_COOKIES_JSON);
   const chromeBin = process.env.CHROME_BIN || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
-  if (!targetUrl) {
-    console.error("Usage: node scripts/browser-audit.mjs <url> [--proxy-server=http://127.0.0.1:7893]");
+  if (!targetUrl || (proxyArg && direct)) {
+    console.error("Usage: node scripts/browser-audit.mjs <url> [--runs=3] [--settle-ms=1500] [--disable-browser-cache] [--direct | --proxy-server=http://127.0.0.1:7893]");
     process.exitCode = 1;
     return;
   }
 
   const profileDir = await mkdtemp(join(tmpdir(), "edgeflow-browser-audit-"));
   const chromeArgs = [
-  "--headless=new",
-  "--disable-gpu",
-  "--no-first-run",
-  "--no-default-browser-check",
-  "--remote-debugging-port=0",
-  `--user-data-dir=${profileDir}`,
-  ...(proxyArg ? [proxyArg] : []),
-  "about:blank"
-];
+    "--headless=new",
+    "--disable-gpu",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--remote-debugging-port=0",
+    `--user-data-dir=${profileDir}`,
+    ...(direct ? ["--no-proxy-server"] : []),
+    ...(proxyArg ? [proxyArg] : []),
+    "about:blank"
+  ];
 
   const chrome = spawn(chromeBin, chromeArgs, { stdio: "ignore" });
 
   try {
-  const port = await readDebugPort(profileDir);
-  const targets = await fetchJson(`http://127.0.0.1:${port}/json/list`);
-  const page = targets.find((target) => target.type === "page");
-  if (!page) throw new Error("Chrome did not expose a page target");
+    const port = await readDebugPort(profileDir);
+    const targets = await fetchJson(`http://127.0.0.1:${port}/json/list`);
+    const page = targets.find((target) => target.type === "page");
+    if (!page) throw new Error("Chrome did not expose a page target");
 
-  const cdp = await CdpClient.connect(page.webSocketDebuggerUrl);
-  const responses = [];
-  const failures = [];
+    const cdp = await CdpClient.connect(page.webSocketDebuggerUrl);
+    let activeNetwork = null;
 
-  cdp.on("Network.responseReceived", ({ response, type }) => {
-    responses.push({
-      type,
-      url: response.url,
-      status: response.status,
-      mimeType: response.mimeType,
-      protocol: response.protocol,
-      fromDiskCache: response.fromDiskCache,
-      fromServiceWorker: response.fromServiceWorker
+    cdp.on("Network.responseReceived", ({ response, type }) => {
+      if (!activeNetwork) return;
+      activeNetwork.responses.push({
+        type,
+        url: response.url,
+        status: response.status,
+        mimeType: response.mimeType,
+        protocol: response.protocol,
+        fromDiskCache: Boolean(response.fromDiskCache),
+        fromServiceWorker: Boolean(response.fromServiceWorker),
+        headers: pickEdgeHeaders(response.headers || {})
+      });
     });
-  });
-  cdp.on("Network.loadingFailed", (event) => {
-    failures.push({
-      errorText: event.errorText,
-      blockedReason: event.blockedReason || "",
-      canceled: Boolean(event.canceled)
+    cdp.on("Network.loadingFailed", (event) => {
+      if (!activeNetwork) return;
+      activeNetwork.failures.push({
+        errorText: event.errorText,
+        blockedReason: event.blockedReason || "",
+        canceled: Boolean(event.canceled)
+      });
     });
-  });
 
-  await cdp.send("Page.enable");
-  await cdp.send("Network.enable");
-  await cdp.send("Network.setCacheDisabled", { cacheDisabled: true });
-  await cdp.send("Runtime.enable");
-  await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
-    source: `
-      globalThis.__edgeflowVitals = { lcp: 0, cls: 0 };
-      new PerformanceObserver((list) => {
-        const entries = list.getEntries();
-        const last = entries[entries.length - 1];
-        if (last) globalThis.__edgeflowVitals.lcp = last.startTime;
-      }).observe({ type: "largest-contentful-paint", buffered: true });
-      new PerformanceObserver((list) => {
-        for (const entry of list.getEntries()) {
-          if (!entry.hadRecentInput) globalThis.__edgeflowVitals.cls += entry.value;
-        }
-      }).observe({ type: "layout-shift", buffered: true });
-    `
-  });
+    await cdp.send("Page.enable");
+    await cdp.send("Network.enable");
+    await cdp.send("Network.setCacheDisabled", { cacheDisabled: disableBrowserCache });
+    await cdp.send("Runtime.enable");
+    await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+      source: `
+        globalThis.__edgeflowVitals = { lcp: 0, cls: 0 };
+        new PerformanceObserver((list) => {
+          const entries = list.getEntries();
+          const last = entries[entries.length - 1];
+          if (last) globalThis.__edgeflowVitals.lcp = last.startTime;
+        }).observe({ type: "largest-contentful-paint", buffered: true });
+        new PerformanceObserver((list) => {
+          for (const entry of list.getEntries()) {
+            if (!entry.hadRecentInput) globalThis.__edgeflowVitals.cls += entry.value;
+          }
+        }).observe({ type: "layout-shift", buffered: true });
+      `
+    });
 
-  const loaded = cdp.waitFor("Page.loadEventFired", 30000);
-  const navigation = await cdp.send("Page.navigate", { url: targetUrl });
-  if (navigation.errorText) throw new Error(`Navigation failed: ${navigation.errorText}`);
-  await loaded;
-  await delay(1500);
+    const results = [];
+    for (let run = 1; run <= runs; run += 1) {
+      activeNetwork = { responses: [], failures: [] };
+      await cdp.send("Network.clearBrowserCache");
+      await cdp.send("Network.clearBrowserCookies");
+      if (injectedCookies.length) await cdp.send("Network.setCookies", { cookies: injectedCookies });
 
-  const evaluation = await cdp.send("Runtime.evaluate", {
-    returnByValue: true,
-    expression: `(() => {
-      const nav = performance.getEntriesByType("navigation")[0];
-      const paints = Object.fromEntries(performance.getEntriesByType("paint").map((entry) => [entry.name, entry.startTime]));
-      return {
-        url: location.href,
-        title: document.title,
-        navigation: nav ? {
-          dns: nav.domainLookupEnd - nav.domainLookupStart,
-          connect: nav.connectEnd - nav.connectStart,
-          tls: nav.secureConnectionStart > 0 ? nav.connectEnd - nav.secureConnectionStart : 0,
-          ttfb: nav.responseStart - nav.requestStart,
-          response: nav.responseEnd - nav.responseStart,
-          domContentLoaded: nav.domContentLoadedEventEnd,
-          load: nav.loadEventEnd,
-          transferSize: nav.transferSize,
-          encodedBodySize: nav.encodedBodySize,
-          decodedBodySize: nav.decodedBodySize
-        } : null,
-        paints,
-        vitals: globalThis.__edgeflowVitals,
-        resourceCount: performance.getEntriesByType("resource").length,
-        slowestResources: performance.getEntriesByType("resource")
-          .map((entry) => ({
-            url: entry.name,
-            initiatorType: entry.initiatorType,
-            duration: entry.duration,
-            transferSize: entry.transferSize,
-            protocol: entry.nextHopProtocol
-          }))
-          .sort((a, b) => b.duration - a.duration)
-          .slice(0, 10)
+      const loaded = cdp.waitFor("Page.loadEventFired", 30000);
+      const navigation = await cdp.send("Page.navigate", { url: targetUrl });
+      if (navigation.errorText) throw new Error(`Navigation failed: ${navigation.errorText}`);
+      await loaded;
+      await delay(settleMs);
+
+      const evaluation = await cdp.send("Runtime.evaluate", {
+        returnByValue: true,
+        expression: `(() => {
+          const nav = performance.getEntriesByType("navigation")[0];
+          const paints = Object.fromEntries(performance.getEntriesByType("paint").map((entry) => [entry.name, entry.startTime]));
+          return {
+            url: location.href,
+            title: document.title,
+            navigation: nav ? {
+              dns: nav.domainLookupEnd - nav.domainLookupStart,
+              connect: nav.connectEnd - nav.connectStart,
+              tls: nav.secureConnectionStart > 0 ? nav.connectEnd - nav.secureConnectionStart : 0,
+              ttfb: nav.responseStart - nav.requestStart,
+              response: nav.responseEnd - nav.responseStart,
+              domContentLoaded: nav.domContentLoadedEventEnd,
+              load: nav.loadEventEnd,
+              transferSize: nav.transferSize,
+              encodedBodySize: nav.encodedBodySize,
+              decodedBodySize: nav.decodedBodySize
+            } : null,
+            paints,
+            vitals: globalThis.__edgeflowVitals,
+            resourceCount: performance.getEntriesByType("resource").length,
+            slowestResources: performance.getEntriesByType("resource")
+              .map((entry) => ({
+                url: entry.name,
+                initiatorType: entry.initiatorType,
+                duration: entry.duration,
+                transferSize: entry.transferSize,
+                protocol: entry.nextHopProtocol
+              }))
+              .sort((a, b) => b.duration - a.duration)
+              .slice(0, 10)
+          };
+        })()`
+      });
+
+      const result = evaluation.result.value;
+      const responses = activeNetwork.responses;
+      const documentResponse = [...responses].reverse().find((item) => item.type === "Document");
+      result.run = run;
+      result.edge = documentResponse?.headers || {};
+      result.network = {
+        responseCount: responses.length,
+        failures: activeNetwork.failures,
+        badStatuses: responses.filter((item) => item.status >= 400),
+        edgeResponses: responses
+          .filter((item) => item.headers["x-edgeflow-cache"])
+          .map((item) => ({
+            type: item.type,
+            url: item.url,
+            status: item.status,
+            cache: item.headers["x-edgeflow-cache"],
+            reason: item.headers["x-edgeflow-cache-reason"] || "",
+            snapshot: item.headers["x-edgeflow-snapshot"] || "",
+            snapshotStore: item.headers["x-edgeflow-snapshot-store"] || ""
+          })),
+        hosts: [...new Set(responses.map((item) => new URL(item.url).host))].sort()
       };
-    })()`
-  });
+      results.push(result);
+    }
 
-  const result = evaluation.result.value;
-  result.network = {
-    responseCount: responses.length,
-    failures,
-    badStatuses: responses.filter((item) => item.status >= 400),
-    hosts: [...new Set(responses.map((item) => new URL(item.url).host))].sort()
-  };
-  console.log(JSON.stringify(result, null, 2));
-  await cdp.close();
+    activeNetwork = null;
+    console.log(JSON.stringify({
+      targetUrl,
+      anonymousProfile: true,
+      browserCacheDisabled: disableBrowserCache,
+      browserCacheClearedBeforeEachRun: true,
+      cookiesClearedBeforeEachRun: true,
+      injectedCookieNames: injectedCookies.map(({ name }) => name),
+      routing: direct ? "direct" : proxyArg || "system",
+      runs: results
+    }, null, 2));
+    await cdp.close();
   } finally {
     await stopChrome(chrome);
     await rm(profileDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
+}
+
+function parseAuditCookies(raw) {
+  if (!raw) return [];
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed)) throw new Error("EDGEFLOW_AUDIT_COOKIES_JSON must be a JSON array");
+  return parsed.map((cookie) => {
+    if (!cookie || typeof cookie.name !== "string" || typeof cookie.value !== "string") {
+      throw new Error("Every audit cookie must contain string name and value fields");
+    }
+    if (typeof cookie.domain !== "string" && typeof cookie.url !== "string") {
+      throw new Error("Every audit cookie must contain domain or url");
+    }
+    return {
+      ...cookie,
+      secure: cookie.secure !== false,
+      path: cookie.path || "/"
+    };
+  });
+}
+
+function parseIntegerArg(args, prefix, fallback, min, max) {
+  const raw = args.find((arg) => arg.startsWith(prefix));
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw.slice(prefix.length), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function pickEdgeHeaders(headers) {
+  const normalized = Object.fromEntries(
+    Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value])
+  );
+  const names = [
+    "cache-control",
+    "server",
+    "server-timing",
+    "x-edgeflow-cache",
+    "x-edgeflow-cache-reason",
+    "x-edgeflow-snapshot",
+    "x-edgeflow-snapshot-age",
+    "x-edgeflow-snapshot-store",
+    "x-edgeflow-refresh",
+    "x-proxy-upstream"
+  ];
+  return Object.fromEntries(names.filter((name) => normalized[name] != null).map((name) => [name, normalized[name]]));
 }
 
 async function stopChrome(chrome) {

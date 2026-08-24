@@ -1,6 +1,20 @@
 # Changelog
 
-## [Unreleased] — v2.4.0
+## [Unreleased] — v2.5.0
+
+### EdgeOne Blob 备用快照
+
+- **feat**: 增加显式 `SNAPSHOT_BLOB_STORE`，在 KV 未绑定时使用 Makers Blob 保存 HTML 快照
+- **safety**: KV 与 Blob 同时配置时保持 KV 优先，不双写、不自动迁移快照
+- **observability**: 增加 `X-EdgeFlow-Snapshot-Store: kv|blob` 和健康检查 `snapshotStoreType`
+- **build**: 使用 esbuild 打包 Edge Function 与 `@edgeone/pages-blob`，保留 CLI 直传所需的单文件产物
+- **test**: 增加 Blob MISS/FRESH、KV 优先级和无效 Blob 配置安全降级测试
+- **preview**: EdgeOne 访问门禁的 `eo_token` / `eo_time` Cookie 不再触发缓存绕过，也不会转发到 Webflow；任何其他真实会话 Cookie 仍强制 BYPASS
+- **audit**: 浏览器审计支持通过 `EDGEFLOW_AUDIT_COOKIES_JSON` 注入受保护预览所需 Cookie，输出只记录 Cookie 名称、不记录值
+- **verified**: 独立预览真实运行时已确认首次 Blob MISS、随后 FRESH/HIT；冷浏览器 HTML TTFB 约 169–335ms，但代理静态资源仍持续 MISS
+- **test**: 浏览器审计记录 HTML 与资源的 EdgeFlow 缓存证据，并区分普通冷访问与硬刷新
+
+## [v2.4.0] — 2026-08-24
 
 ### EdgeOne 持久快照
 

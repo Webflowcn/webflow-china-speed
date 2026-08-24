@@ -1,15 +1,22 @@
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import { build } from "esbuild";
 
-const proxyCode = readFileSync("edge-functions/_shared/proxy.js", "utf-8");
+const entries = ["index.js", "[[default]].js"];
 
-const wrapperCode = `export default async function onRequest(context) {
-  return handleProxyRequest(context.request, context.env || {}, context);
+await mkdir(".edgeone/edge-functions", { recursive: true });
+
+for (const entry of entries) {
+  await build({
+    entryPoints: [`edge-functions/${entry}`],
+    outfile: `.edgeone/edge-functions/${entry}`,
+    bundle: true,
+    format: "esm",
+    platform: "browser",
+    target: "es2022",
+    legalComments: "none",
+    minify: false,
+    sourcemap: false
+  });
 }
-`;
-
-mkdirSync(".edgeone/edge-functions", { recursive: true });
-
-writeFileSync(".edgeone/edge-functions/index.js", wrapperCode + "\n" + proxyCode);
-writeFileSync(".edgeone/edge-functions/[[default]].js", wrapperCode + "\n" + proxyCode);
 
 console.log("✓ Edge functions bundled to .edgeone/edge-functions/");

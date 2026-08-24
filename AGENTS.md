@@ -5,7 +5,7 @@
  > Webflow 网站在中国大陆的被 GFW 封控，无法访问。本仓库提供反向代理解决方案，两条路线可选，5 分钟恢复访问。
 
  **仓库**: `shenyeah/webflow-china-speedup`
- **最新发布版本**: v2.2（当前工作树准备 v2.3，尚未部署）
+ **最新 main 版本**: v2.4.0（当前工作树准备 v2.5.0 Blob 备用快照，尚未部署）
  **自动部署**: [![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/shenyeah/webflow-china-speedup/tree/main/packages/cf-worker) [![使用 EdgeOne Pages 部署](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://console.cloud.tencent.com/edgeone/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fshenyeah%2Fwebflow-china-speedup)
 
  ---
@@ -39,6 +39,7 @@
  ├── edgeone.config.json → packages/edgeone/edgeone.config.json  # 软链接
  ├── build.mjs           → packages/edgeone/build.mjs       # （EdgeOne 部署用）
  ├── package.json        → packages/edgeone/package.json    #
+ ├── package-lock.json   → packages/edgeone/package-lock.json #
  ├── edge-functions/     → packages/edgeone/edge-functions/ #
   ├── .edgeoneignore      → packages/edgeone/.edgeoneignore  #
  └── .env.example        → packages/edgeone/.env.example    #
@@ -85,6 +86,7 @@
  ### 通用
  - `WEBFLOW_HOST`: 你的 Webflow 站点标识（如 `webflowcn`），默认值 `webflowcn.webflow.io`
  - `CACHE_TTL`: 边缘缓存 TTL（秒，默认 300）
+ - `SNAPSHOT_BLOB_STORE`: KV 不可用时显式启用 Blob 备用 HTML 快照；默认关闭
 
  > 当前 EdgeOne 路线未实现 `ACCESS_KEY`。不要在文档或交付中声称已支持访问密钥。
 
@@ -101,7 +103,7 @@
 
  - **两条路线共享核心代理逻辑**: CF Worker（`worker.js`）和 EdgeOne（`proxy.js`）的 URL 重写规则一致，只是部署平台不同
  - **R2 永久缓存**: 静态资源首次回源后永久存储在 R2，后续直接从 R2 读取
- - **EdgeOne 边缘函数打包**: `build.mjs` 将 `proxy.js` 内联进两个入口文件（`index.js` + `[[default]].js`），EdgeOne Pages 无需额外包管理
+ - **EdgeOne 边缘函数打包**: `build.mjs` 使用 esbuild 将入口、`proxy.js` 和 Makers Blob SDK打成两个独立 ESM 单文件（`index.js` + `[[default]].js`）
  - **版本隔离**: 两路线独立版本控制，`package.json` 各自管理
 - **零配置部署**: 两路线均内置默认值 `webflowcn.webflow.io`，点 badge 部署后即可绑定域名使用
 
