@@ -269,6 +269,7 @@ test("health response is minimal and contains no request or runtime dump", async
     "cacheApiAvailable",
     "ok",
     "originConfigured",
+    "publicHostConfigured",
     "runtime",
     "snapshotStoreAvailable",
     "snapshotStoreType",
@@ -276,11 +277,120 @@ test("health response is minimal and contains no request or runtime dump", async
   ]);
   assert.equal(JSON.stringify(body).includes("203.0.113.8"), false);
   assert.equal(JSON.stringify(body).includes("private=value"), false);
-  assert.equal(body.version, "2.5.0");
+  assert.equal(body.version, "2.6.0");
   assert.equal(body.cacheApiAvailable, true);
   assert.equal(body.snapshotStoreAvailable, false);
   assert.equal(body.snapshotStoreType, null);
   assert.equal(response.headers.get("x-edgeflow-cache"), "BYPASS");
+});
+
+test("PUBLIC_HOST controls rewritten HTML, canonical URLs, and redirects", async () => {
+  globalThis.fetch = async () => htmlResponse(`<!doctype html><html><head>
+    <link rel="canonical" href="https://origin.example.com/about">
+  </head><body><a href="https://origin.example.com/contact">Contact</a></body></html>`);
+
+  const response = await handleProxyRequest(
+    new Request("https://makers-origin.example/about"),
+    { WEBFLOW_HOST: "origin.example.com", PUBLIC_HOST: "https://public.example.com" },
+    createContext()
+  );
+  const body = await response.text();
+  assert.match(body, /https:\/\/public\.example\.com\/about/);
+  assert.match(body, /https:\/\/public\.example\.com\/contact/);
+  assert.doesNotMatch(body, /makers-origin\.example|origin\.example\.com/);
+});
+
+test("Accept differences share one cache key and rewritten output has no unnecessary Vary", async () => {
+  let fetchCount = 0;
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    return htmlResponse("<html><body>same representation</body></html>", {
+      headers: { vary: "Accept, Accept-Encoding" }
+    });
+  };
+  const env = { WEBFLOW_HOST: "origin.example.com" };
+  const first = await handleProxyRequest(
+    new Request("https://proxy.example.com/", { headers: { accept: "text/html" } }),
+    env,
+    createContext()
+  );
+  const second = await handleProxyRequest(
+    new Request("https://proxy.example.com/", { headers: { accept: "*/*" } }),
+    env,
+    createContext()
+  );
+  assert.equal(first.headers.get("x-edgeflow-cache-store"), "STORE_OK");
+  assert.equal(first.headers.get("vary"), null);
+  assert.equal(second.headers.get("x-edgeflow-cache"), "HIT");
+  assert.equal(fetchCount, 1);
+});
+
+test("Cache API write failures are visible and do not break delivery", async () => {
+  globalThis.caches = {
+    default: {
+      async match() { return undefined; },
+      async put() { throw new Error("node-local cache rejected response"); }
+    }
+  };
+  globalThis.fetch = async () => new Response("font", {
+    status: 200,
+    headers: { "content-type": "font/woff2" }
+  });
+  const response = await handleProxyRequest(
+    new Request("https://proxy.example.com/__eo_asset_v3__/cdn.prod.website-files.com/font.12345678.woff2"),
+    { WEBFLOW_HOST: "origin.example.com" },
+    createContext()
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-edgeflow-cache"), "MISS");
+  assert.equal(response.headers.get("x-edgeflow-cache-store"), "STORE_FAILED");
+  assert.equal(response.headers.get("x-edgeflow-cache-class"), "fingerprinted-static");
+  assert.equal(response.headers.get("x-edgeflow-content-class"), "font");
+});
+
+test("functional HTML queries bypass Cache API while tracking queries normalize", async () => {
+  let fetchCount = 0;
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    return htmlResponse(`<html><body>${fetchCount}</body></html>`);
+  };
+  const env = { WEBFLOW_HOST: "origin.example.com" };
+  const functional = await handleProxyRequest(
+    new Request("https://proxy.example.com/search?query=chair"),
+    env,
+    createContext()
+  );
+  assert.equal(functional.headers.get("x-edgeflow-cache"), "BYPASS");
+  assert.equal(functional.headers.get("x-edgeflow-cache-reason"), "functional-query");
+
+  const trackingFirst = await handleProxyRequest(
+    new Request("https://proxy.example.com/?utm_source=one"),
+    env,
+    createContext()
+  );
+  const trackingSecond = await handleProxyRequest(
+    new Request("https://proxy.example.com/?gclid=two"),
+    env,
+    createContext()
+  );
+  assert.equal(trackingFirst.headers.get("x-edgeflow-cache"), "MISS");
+  assert.equal(trackingSecond.headers.get("x-edgeflow-cache"), "HIT");
+  assert.equal(fetchCount, 2);
+});
+
+test("GET API paths never enter shared cache or HTML snapshots", async () => {
+  globalThis.EDGEFLOW_SNAPSHOT = new MemoryKv();
+  globalThis.fetch = async () => new Response('{"ok":true}', {
+    headers: { "content-type": "application/json" }
+  });
+  const response = await handleProxyRequest(
+    new Request("https://proxy.example.com/api/status"),
+    { WEBFLOW_HOST: "origin.example.com" },
+    createContext()
+  );
+  assert.equal(response.headers.get("x-edgeflow-cache"), "BYPASS");
+  assert.equal(response.headers.get("x-edgeflow-cache-reason"), "private-path");
+  assert.equal(response.headers.get("x-edgeflow-snapshot"), null);
 });
 
 test("HEAD reuses a cached GET but cannot poison an empty cache", async () => {
@@ -754,4 +864,53 @@ test("authenticated refresh endpoint updates configured snapshot paths", async (
     createContext()
   );
   assert.equal(hit.headers.get("x-edgeflow-snapshot"), "FRESH");
+});
+
+test("authenticated refresh endpoint discovers up to 20 HTML paths from the origin sitemap", async () => {
+  globalThis.caches = undefined;
+  globalThis.EDGEFLOW_SNAPSHOT = new MemoryKv();
+  const fetched = [];
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(url);
+    fetched.push(parsed.pathname);
+    if (parsed.pathname === "/sitemap.xml") {
+      return new Response(`<?xml version="1.0"?><urlset>
+        <url><loc>https://origin.example.com/</loc></url>
+        <url><loc>https://origin.example.com/about?utm_source=sitemap</loc></url>
+        <url><loc>https://other.example.com/foreign</loc></url>
+      </urlset>`, { headers: { "content-type": "application/xml" } });
+    }
+    return htmlResponse(`<html><body>${parsed.pathname}</body></html>`);
+  };
+  const env = {
+    WEBFLOW_HOST: "origin.example.com",
+    PUBLIC_HOST: "accelerated.example.com",
+    SNAPSHOT_REFRESH_SECRET: "test-secret"
+  };
+  const response = await handleProxyRequest(
+    new Request("https://makers-origin.example/__proxy/refresh", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer test-secret",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ limit: 20 })
+    }),
+    env,
+    createContext()
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).results, [
+    { path: "/", ok: true },
+    { path: "/about", ok: true }
+  ]);
+  assert.deepEqual(fetched, ["/sitemap.xml", "/", "/about"]);
+
+  const hit = await handleProxyRequest(
+    new Request("https://makers-origin.example/about"),
+    env,
+    createContext()
+  );
+  assert.equal(hit.headers.get("x-edgeflow-snapshot"), "FRESH");
+  assert.match(await hit.text(), /accelerated\.example\.com|\/about/);
 });

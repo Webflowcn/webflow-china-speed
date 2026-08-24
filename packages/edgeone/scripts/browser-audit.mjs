@@ -153,9 +153,15 @@ async function main() {
             status: item.status,
             cache: item.headers["x-edgeflow-cache"],
             reason: item.headers["x-edgeflow-cache-reason"] || "",
+            store: item.headers["x-edgeflow-cache-store"] || "",
+            cacheClass: item.headers["x-edgeflow-cache-class"] || "",
+            contentClass: item.headers["x-edgeflow-content-class"] || "",
             snapshot: item.headers["x-edgeflow-snapshot"] || "",
             snapshotStore: item.headers["x-edgeflow-snapshot-store"] || ""
           })),
+        feedSpring: responses
+          .filter((item) => new URL(item.url).host.endsWith("feedspring.co"))
+          .map((item) => ({ url: item.url, status: item.status })),
         hosts: [...new Set(responses.map((item) => new URL(item.url).host))].sort()
       };
       results.push(result);
@@ -216,6 +222,9 @@ function pickEdgeHeaders(headers) {
     "server-timing",
     "x-edgeflow-cache",
     "x-edgeflow-cache-reason",
+    "x-edgeflow-cache-store",
+    "x-edgeflow-cache-class",
+    "x-edgeflow-content-class",
     "x-edgeflow-snapshot",
     "x-edgeflow-snapshot-age",
     "x-edgeflow-snapshot-store",

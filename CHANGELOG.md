@@ -1,6 +1,16 @@
 # Changelog
 
-## [Unreleased] — v2.5.0
+## [Unreleased] — v2.6.0
+
+### 腾讯云 Site Acceleration 测试候选
+
+- **feat**: 增加 `PUBLIC_HOST`，确保经 Site Acceleration 回源后的 HTML、Canonical、资源和跳转使用外部域名
+- **observability**: Cache API 写入明确输出 `STORE_OK / STORE_FAILED`，并增加缓存分类和内容分类响应头
+- **cache**: 移除不改变响应内容的 `Accept` 缓存键及 `Vary`，HTML tracking 查询参数归一化，功能性查询继续 BYPASS
+- **prewarm**: 受鉴权刷新接口默认读取源站 Sitemap，最多预热 20 个 HTML 页面
+- **audit**: 增加静态资源连续请求审计，并将 FeedSpring 403 单列
+
+## [v2.5.0] — 2026-08-24
 
 ### EdgeOne Blob 备用快照
 

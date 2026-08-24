@@ -1,13 +1,14 @@
 {
   "name": "reverse-proxy-edgeone-v2",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
     "test": "node --test",
     "test:local": "npm test",
-    "audit:live": "node scripts/browser-audit.mjs"
+    "audit:live": "node scripts/browser-audit.mjs",
+    "audit:resource": "node scripts/resource-repeat-audit.mjs"
   },
   "dependencies": {
     "@edgeone/pages-blob": "^0.0.16"

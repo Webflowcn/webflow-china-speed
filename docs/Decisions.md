@@ -74,6 +74,16 @@
 
 **运行时验证**: 独立预览项目首次 HTML 请求已观测到 `MISS + blob`，随后请求为 `HIT + FRESH + blob`。为避免预览门禁本身导致误判，只将 EdgeOne 的 `eo_token` / `eo_time` 视为平台门禁并在回源前剥离；任何其他 Cookie 仍绕过缓存。Blob 解决了 HTML 的跨请求持久命中，但静态资源仍依赖 Cache API，冷浏览器复测持续 MISS，因此不能把 Blob 成功解释为整页所有资源均已加速。
 
+---
+
+## ADR-008: Makers 负责改写，Site Acceleration 负责静态边缘缓存
+
+**决策**: v2.6 将 Makers Blob 继续限制为 HTML 快照；`caches.default` 只作可诊断的节点级临时缓存。跨节点静态资源缓存交给独立的 EdgeOne Site Acceleration 测试域名验证。
+
+**背景**: Makers 真实运行时中，同一指纹字体连续请求仍全部 MISS。Cache API 只对当前数据节点有效，不能作为全局持久缓存承诺；Blob 官方也不建议作为公网图片/CDN。
+
+**结果**: 增加 `PUBLIC_HOST` 以支持 CDN 回源域名与外部域名分离；减少 `Accept/Vary` 变体；输出 Cache API 写入和内容分类诊断；通过受鉴权 Sitemap 预热接口准备 HTML，静态字体、图片、CSS、JS 则由 Site Acceleration 规则和预热功能承担。
+
 
 ---
 

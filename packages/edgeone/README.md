@@ -16,7 +16,7 @@
 
 ## 缓存架构
 
-v2.5 优先从 Makers KV 读取已经完成改写的 HTML 快照。KV 未绑定且显式配置 `SNAPSHOT_BLOB_STORE` 时，改用 Blob 作为备用持久快照；两者同时存在时 KV 永远优先。快照新鲜时直接返回；过期时先返回旧快照，再通过 `context.waitUntil()` 后台刷新。两种持久存储都不可用时安全降级到 Cache API 和实时回源。
+v2.6 优先从 Makers KV 读取已经完成改写的 HTML 快照。KV 未绑定且显式配置 `SNAPSHOT_BLOB_STORE` 时，改用 Blob 作为备用持久快照；两者同时存在时 KV 永远优先。快照新鲜时直接返回；过期时先返回旧快照，再通过 `context.waitUntil()` 后台刷新。两种持久存储都不可用时安全降级到 Cache API 和实时回源。
 
 | 层级 | 组件 | TTL | 说明 |
 |------|------|-----|------|
@@ -34,6 +34,8 @@ v2.5 优先从 Makers KV 读取已经完成改写的 HTML 快照。KV 未绑定�
 - 用 `X-EdgeFlow-Snapshot: FRESH|STALE|MISS` 判断持久快照状态。
 - 用 `X-EdgeFlow-Snapshot-Store: kv|blob` 确认实际使用的持久后端。
 - 用 `X-EdgeFlow-Cache: HIT|MISS|BYPASS` 判断整体缓存结果，不再根据耗时或 `Age` 猜测。
+- 用 `X-EdgeFlow-Cache-Store: STORE_OK|STORE_FAILED` 判断本次节点 Cache API 写入是否成功；该缓存仍只作为非关键临时层。
+- 用 `X-EdgeFlow-Cache-Class` 和 `X-EdgeFlow-Content-Class` 区分 HTML、字体、图片、CSS、JS 等资源。
 - 带功能性查询参数、Cookie、Authorization 或 Range 的请求不进入 HTML 公共快照；常见 tracking 参数会归一化。
 
 ## 2026 年 EdgeOne 新功能
@@ -59,6 +61,7 @@ KV 命名空间需要在 EdgeOne Makers 控制台创建并绑定到项目，绑�
 | v2.3.1 | 修复 Makers 原生缓存 schema、过期元数据、缓存自愈与分阶段计时 |
 | v2.4 | 增加 KV 持久 HTML 快照、stale-while-refresh、主动刷新端点和最后成功版本回退 |
 | v2.5 | 增加可选 Blob 备用快照、KV 优先级、依赖打包和存储后端诊断头 |
+| v2.6 | 增加 `PUBLIC_HOST`、Cache API 写入诊断、资源分类、Sitemap 批量预热，并移除无意义的 `Accept/Vary` 变体 |
 
 ## v2.0 修复内容
 
@@ -66,7 +69,7 @@ KV 命名空间需要在 EdgeOne Makers 控制台创建并绑定到项目，绑�
 |---|------|---------|
 | 1 | Geo 路由不生效 | 改用 `getClientCountry()` 多 header fallback，不再只依赖 `EO-Client-IPCountry` |
 | 2 | Health 端点 500 | 不用 `Response.json()`，改用 `new Response(JSON.stringify())` |
-| 3 | 缓存不分地区 | 响应增加地区 `Vary`；v2.3.1 移除未受 Makers schema 支持的 `varyByHeader`，原生长缓存只用于代理资源路径 |
+| 3 | 缓存不分地区 | 仅 CN 请求进入共享缓存；Geo 301 为 `no-store`。v2.6 移除不改变内容却会制造重复版本的 `Accept/Vary` |
 | 4 | stale 过期太长 | 从 604800(7天) 降至 3600(1小时) |
 
 ## 部署步骤
@@ -133,7 +136,7 @@ npm run audit:live -- https://你的域名 --disable-browser-cache
 部署后访问 `https://你的域名/__proxy/health`，应看到：
 
 ```json
-{"ok":true,"runtime":"edgeone-pages","version":"2.5.0","originConfigured":true,"cacheApiAvailable":true,"snapshotStoreAvailable":true,"snapshotStoreType":"kv"}
+{"ok":true,"runtime":"edgeone-pages","version":"2.6.0","originConfigured":true,"publicHostConfigured":true,"cacheApiAvailable":true,"snapshotStoreAvailable":true,"snapshotStoreType":"blob"}
 ```
 
 - 用美国代理访问 → 应 301 重定向到 `webflowcn.webflow.io`
@@ -148,10 +151,11 @@ npm run audit:live -- https://你的域名 --disable-browser-cache
  | 变量名 | 必填 | 说明 |
  |--------|------|------|
  | `WEBFLOW_HOST` | 可选 | 你的 Webflow 项目地址（默认 `webflowcn.webflow.io`）|
+ | `PUBLIC_HOST` | 可选 | Site Acceleration 对外域名；HTML、Canonical、资源链接和跳转统一改写到该域名 |
  | `CACHE_TTL` | 可选 | HTML 显式缓存 TTL，默认 300 秒 |
  | `SNAPSHOT_TTL` | 可选 | KV/Blob HTML 快照新鲜期，默认 900 秒 |
  | `SNAPSHOT_BLOB_STORE` | 可选 | KV 不可用时启用 Blob 备用快照；建议值 `edgeflow-snapshots`，未设置则关闭 |
- | `SNAPSHOT_PATHS` | 可选 | 主动刷新页面列表，英文逗号分隔，默认 `/` |
+ | `SNAPSHOT_PATHS` | 可选 | Sitemap 不可用时的主动刷新备用页面列表，默认 `/` |
  | `SNAPSHOT_REFRESH_SECRET` | 可选 | 主动刷新端点密钥；必须放在控制台环境变量，不要提交到 Git |
  | `MIRROR_JQUERY` | 可选 | jQuery 国内镜像地址 |
 | `MIRROR_JSD_MIRROR` | 可选 | jsDelivr 国内镜像 |
@@ -160,13 +164,19 @@ npm run audit:live -- https://你的域名 --disable-browser-cache
 
 KV 本身不是普通环境变量。在 Makers 控制台把目标命名空间绑定为 `EDGEFLOW_SNAPSHOT` 后，函数会自动启用 KV 持久快照。Blob 则通过普通环境变量 `SNAPSHOT_BLOB_STORE` 显式开启；Store 由官方 SDK首次调用时自动创建。两者同时存在时使用 KV，避免迁移期间双写或出现两套快照来源。
 
-主动刷新示例：
+主动刷新默认读取源站 Sitemap，最多预热 20 个 HTML 页面：
 
 ```bash
 curl -X POST 'https://你的域名/__proxy/refresh' \
   -H 'Authorization: Bearer 你的环境密钥' \
   -H 'Content-Type: application/json' \
-  --data '{"paths":["/","/about"]}'
+  --data '{"limit":20}'
+```
+
+也可以显式提交 `{"paths":["/","/about"]}`。同一静态资源连续请求 5 次且不主动发送 `no-cache`：
+
+```bash
+npm run audit:resource -- 'https://你的域名/__eo_asset_v3__/...woff2' --runs=5
 ```
 
 ## 注意事项

@@ -30,7 +30,7 @@ test("EdgeOne native cache configuration uses the supported Makers schema", () =
   assert.equal("cache" in config, false);
   assert.equal(
     config.headers[0].headers.find((header) => header.key === "X-Proxy-Version")?.value,
-    "webflow-china-speedup/2.5.0"
+    "webflow-china-speedup/2.6.0"
   );
   assert.deepEqual(config.caches, [
     {

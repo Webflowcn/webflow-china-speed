@@ -1,8 +1,9 @@
 /**
- * Webflow China Speedup — EdgeOne Makers 代理核心逻辑 (v2.5.0)
+ * Webflow China Speedup — EdgeOne Makers 代理核心逻辑 (v2.6.0)
  *
  * ╔═══════════════════════════════════════════════════════════════╗
  * ║  改动记录                                                     ║
+ * ║  [v2.6.0] 公共域名重写 + 缓存诊断 + Sitemap 批量预热        ║
  * ║  [v2.5.0] Blob 备用 HTML 快照 + 依赖打包                     ║
  * ║  [v2.4.0] KV 持久 HTML 快照 + 后台刷新 + 故障回退           ║
  * ║  [v2.3.1] 修复原生缓存配置 + 过期元数据 + 回源计时           ║
@@ -45,11 +46,15 @@ const STATIC_EXT_RE = /\.(?:js|mjs|css|png|jpg|jpeg|gif|webp|svg|ico|woff2|woff|
 const FINGERPRINT_RE = /(?:^|[._/-])[a-f0-9]{8,}(?:[._/-]|$)/i;
 const EDGEFLOW_CACHE_HEADER = "x-edgeflow-cache";
 const EDGEFLOW_CACHE_REASON_HEADER = "x-edgeflow-cache-reason";
+const EDGEFLOW_CACHE_STORE_HEADER = "x-edgeflow-cache-store";
+const EDGEFLOW_CACHE_CLASS_HEADER = "x-edgeflow-cache-class";
+const EDGEFLOW_CONTENT_CLASS_HEADER = "x-edgeflow-content-class";
 const EDGEFLOW_SNAPSHOT_HEADER = "x-edgeflow-snapshot";
 const EDGEFLOW_SNAPSHOT_AGE_HEADER = "x-edgeflow-snapshot-age";
 const EDGEFLOW_SNAPSHOT_STORE_HEADER = "x-edgeflow-snapshot-store";
 const SNAPSHOT_SCHEMA_VERSION = 1;
 const TRACKING_QUERY_RE = /^(?:utm_[a-z0-9_]+|fbclid|gclid|msclkid)$/i;
+const PRIVATE_PATH_RE = /^\/(?:__proxy(?:\/|$)|api(?:\/|$))/i;
 const EDGEONE_ACCESS_COOKIE_NAMES = new Set(["eo_token", "eo_time"]);
 const activeSnapshotRefreshes = new Map();
 
@@ -86,6 +91,7 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
   const requestStartedAt = monotonicNow();
   const reqUrl = new URL(request.url);
   const cfg = resolveSiteConfig(env);
+  const publicUrl = resolvePublicUrl(reqUrl, cfg);
 
   // ════════════════════════════════════════════════════════════
   // Health 端点 — 用 new Response() 而非 Response.json()
@@ -96,8 +102,9 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
     const body = JSON.stringify({
       ok: true,
       runtime: "edgeone-pages",
-      version: "2.5.0",
+      version: "2.6.0",
       originConfigured: Boolean(cfg.originHost),
+      publicHostConfigured: Boolean(cfg.publicHost),
       cacheApiAvailable: Boolean(globalThis.caches && globalThis.caches.default),
       snapshotStoreAvailable: Boolean(snapshotBackend),
       snapshotStoreType: snapshotBackend?.type || null
@@ -121,7 +128,7 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
 
   // Serve generated robots.txt and sitemap.xml
   if (reqUrl.pathname === "/robots.txt") {
-    const sitemapUrl = `${reqUrl.protocol}//${reqUrl.host}/sitemap.xml`;
+    const sitemapUrl = `${publicUrl.protocol}//${publicUrl.host}/sitemap.xml`;
     const body = `User-agent: *\nAllow: /\nSitemap: ${sitemapUrl}\n`;
     return new Response(body, {
       status: 200,
@@ -131,7 +138,7 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
 
   if (reqUrl.pathname === "/sitemap.xml") {
     try {
-      const sitemap = await generateSitemap(cfg, reqUrl);
+      const sitemap = await generateSitemap(cfg, publicUrl);
       return new Response(sitemap, {
         status: 200,
         headers: { "content-type": "application/xml; charset=utf-8", "cache-control": "public, max-age=3600" }
@@ -180,7 +187,7 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
     return new Response("400 Invalid asset proxy target", { status: 400 });
   }
 
-  const snapshotPlan = await createSnapshotPlan(request, reqUrl, target, cfg, country, env);
+  const snapshotPlan = await createSnapshotPlan(request, publicUrl, target, cfg, country, env);
   let snapshotLookupMs = 0;
   if (snapshotPlan.lookup) {
     const snapshotLookupStartedAt = monotonicNow();
@@ -214,7 +221,7 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
     }
   }
 
-  const cachePlan = createCachePlan(request, reqUrl, target, cfg, country);
+  const cachePlan = createCachePlan(request, publicUrl, target, cfg, country);
   let cacheLookupMs = 0;
   if (cachePlan.lookup) {
     const cacheLookupStartedAt = monotonicNow();
@@ -240,7 +247,7 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
     }
   }
 
-  const upstreamHeaders = buildUpstreamHeaders(request, reqUrl, target.upstreamHost);
+  const upstreamHeaders = buildUpstreamHeaders(request, publicUrl, target.upstreamHost);
 
   let upstreamResp;
   const originStartedAt = monotonicNow();
@@ -257,7 +264,7 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
   const originMs = elapsedMs(originStartedAt);
 
   const rewriteStartedAt = monotonicNow();
-  const rewritten = await rewriteResponse(upstreamResp, reqUrl, request.method, target, cfg);
+  const rewritten = await rewriteResponse(upstreamResp, publicUrl, request.method, target, cfg);
   const rewriteMs = elapsedMs(rewriteStartedAt);
   const storeDecision = canStoreResponse(rewritten, cachePlan);
   const snapshotDecision = canStoreSnapshot(rewritten, snapshotPlan);
@@ -270,13 +277,13 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
 
   if (storeDecision.store) {
     const cachedResponse = rewritten.clone();
-    const putTask = Promise.resolve(cachePlan.cache.put(cachePlan.key, cachedResponse)).catch(() => undefined);
-    if (context && typeof context.waitUntil === "function") {
-      context.waitUntil(putTask);
-    } else {
-      await putTask;
+    let cacheStoreStatus = "STORE_OK";
+    try {
+      await cachePlan.cache.put(cachePlan.key, cachedResponse);
+    } catch (_cacheStoreError) {
+      cacheStoreStatus = "STORE_FAILED";
     }
-    const missResponse = withCacheStatus(rewritten, "MISS", request.method, cachePlan.kind);
+    const missResponse = withCacheStatus(rewritten, "MISS", request.method, cachePlan.kind, cacheStoreStatus);
     return withServerTiming(snapshotDecision.store
       ? withSnapshotStatus(missResponse, "MISS", 0, "", snapshotPlan.backend)
       : missResponse, {
@@ -321,6 +328,7 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
 function resolveSiteConfig(env) {
   return {
     originHost: env.WEBFLOW_HOST || DEFAULT_CONFIG.originHost,
+    publicHost: normalizeHost(env.PUBLIC_HOST || ""),
     assetProxyPrefix: ensurePrefix(env.ASSET_PROXY_PREFIX || DEFAULT_CONFIG.assetProxyPrefix),
     proxyableHosts: DEFAULT_CONFIG.proxyableHosts,
     mirrorJquery: env.MIRROR_JQUERY || DEFAULT_CONFIG.mirrorJquery,
@@ -330,6 +338,25 @@ function resolveSiteConfig(env) {
     snapshotTtl: parsePositiveInt(env.SNAPSHOT_TTL, 900),
     snapshotPaths: parseSnapshotPaths(env.SNAPSHOT_PATHS || "/")
   };
+}
+
+function resolvePublicUrl(reqUrl, cfg) {
+  if (!cfg.publicHost) return new URL(reqUrl.toString());
+  const url = new URL(reqUrl.toString());
+  url.protocol = "https:";
+  url.host = cfg.publicHost;
+  return url;
+}
+
+function normalizeHost(value) {
+  const input = String(value || "").trim();
+  if (!input) return "";
+  try {
+    const parsed = new URL(input.includes("://") ? input : `https://${input}`);
+    return parsed.host;
+  } catch (_error) {
+    return "";
+  }
 }
 
 async function createSnapshotPlan(request, reqUrl, target, cfg, country, env, options = {}) {
@@ -356,6 +383,7 @@ async function createSnapshotPlan(request, reqUrl, target, cfg, country, env, op
     return { ...base, store, reason: "snapshot-cookie" };
   }
   if (request.headers.get("range")) return { ...base, store, reason: "snapshot-range" };
+  if (PRIVATE_PATH_RE.test(reqUrl.pathname)) return { ...base, store, reason: "snapshot-private-path" };
 
   const normalizedUrl = normalizeSnapshotUrl(reqUrl);
   if (!normalizedUrl) return { ...base, store, reason: "snapshot-query" };
@@ -472,6 +500,9 @@ async function storeSnapshot(snapshotPlan, response) {
   headers.delete("server-timing");
   headers.delete(EDGEFLOW_CACHE_HEADER);
   headers.delete(EDGEFLOW_CACHE_REASON_HEADER);
+  headers.delete(EDGEFLOW_CACHE_STORE_HEADER);
+  headers.delete(EDGEFLOW_CACHE_CLASS_HEADER);
+  headers.delete(EDGEFLOW_CONTENT_CLASS_HEADER);
   headers.delete(EDGEFLOW_SNAPSHOT_HEADER);
   headers.delete(EDGEFLOW_SNAPSHOT_AGE_HEADER);
   headers.delete(EDGEFLOW_SNAPSHOT_STORE_HEADER);
@@ -523,14 +554,16 @@ async function handleSnapshotRefreshEndpoint(request, env, context, cfg, reqUrl)
     return new Response("Unauthorized", { status: 401 });
   }
 
-  const requestedPaths = Array.isArray(payload.paths) ? payload.paths : cfg.snapshotPaths;
+  const requestedPaths = Array.isArray(payload.paths)
+    ? payload.paths
+    : await discoverSnapshotPaths(cfg, reqUrl, payload.limit);
   const paths = requestedPaths
     .filter((path) => typeof path === "string" && path.startsWith("/") && !path.startsWith("//"))
     .slice(0, 20);
   const results = [];
   for (const path of paths) {
     try {
-      const publicUrl = new URL(path, `${reqUrl.protocol}//${reqUrl.host}`);
+      const publicUrl = new URL(path, `${reqUrl.protocol}//${cfg.publicHost || reqUrl.host}`);
       const refreshRequest = new Request(publicUrl.toString(), { headers: { accept: "text/html" } });
       const target = resolveUpstreamTarget(publicUrl, cfg);
       const plan = await createSnapshotPlan(refreshRequest, publicUrl, target, cfg, "CN", env, { force: true });
@@ -547,6 +580,42 @@ async function handleSnapshotRefreshEndpoint(request, env, context, cfg, reqUrl)
     status: results.every((item) => item.ok) ? 200 : 502,
     headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }
   });
+}
+
+async function discoverSnapshotPaths(cfg, reqUrl, requestedLimit) {
+  const limit = Math.min(parsePositiveInt(requestedLimit, 20), 20);
+  try {
+    const originSitemapUrl = `https://${cfg.originHost}/sitemap.xml`;
+    const response = await fetch(originSitemapUrl, { headers: { "accept-encoding": "identity" } });
+    if (!response.ok) throw new Error(`sitemap-status-${response.status}`);
+    const xml = await response.text();
+    const paths = [];
+    const seen = new Set();
+    for (const match of xml.matchAll(/<loc>\s*([^<]+?)\s*<\/loc>/gi)) {
+      let candidate;
+      try {
+        candidate = new URL(decodeXmlEntities(match[1]), `https://${cfg.originHost}`);
+      } catch (_error) {
+        continue;
+      }
+      if (candidate.host !== cfg.originHost || candidate.pathname.endsWith(".xml")) continue;
+      const path = `${candidate.pathname}${candidate.search}`;
+      if (!seen.has(path)) {
+        seen.add(path);
+        paths.push(path);
+      }
+      if (paths.length >= limit) break;
+    }
+    if (paths.length) return paths;
+  } catch (_error) {}
+  return cfg.snapshotPaths.slice(0, limit);
+}
+
+function decodeXmlEntities(value) {
+  return String(value)
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
 }
 
 function parseSnapshotPaths(value) {
@@ -572,6 +641,10 @@ function createCachePlan(request, reqUrl, target, cfg, country) {
   if (request.headers.get("authorization")) return { ...base, reason: "authorization" };
   if (hasPersonalizationCookies(request.headers.get("cookie"))) return { ...base, reason: "cookie" };
   if (request.headers.get("range")) return { ...base, reason: "range" };
+  if (PRIVATE_PATH_RE.test(reqUrl.pathname)) return { ...base, reason: "private-path" };
+  if (base.kind === "html" && hasFunctionalQuery(reqUrl)) {
+    return { ...base, reason: "functional-query" };
+  }
 
   const requestCacheControl = (request.headers.get("cache-control") || "").toLowerCase();
   if (requestCacheControl.includes("no-store") || requestCacheControl.includes("no-cache")) {
@@ -583,19 +656,30 @@ function createCachePlan(request, reqUrl, target, cfg, country) {
     return { ...base, reason: "cache-api-unavailable" };
   }
 
-  const keyHeaders = new Headers();
-  const accept = request.headers.get("accept");
-  if (accept) keyHeaders.set("accept", accept);
-
   return {
     ...base,
     lookup: true,
     store: method === "GET",
     cache,
-    key: new Request(reqUrl.toString(), { method: "GET", headers: keyHeaders }),
+    key: new Request(normalizeCacheUrl(reqUrl, base.kind).toString(), { method: "GET" }),
     reason: method === "HEAD" ? "head-miss" : "cache-miss",
     htmlCacheTtl: cfg.htmlCacheTtl
   };
+}
+
+function hasFunctionalQuery(url) {
+  return [...url.searchParams.keys()].some((key) => !TRACKING_QUERY_RE.test(key));
+}
+
+function normalizeCacheUrl(inputUrl, kind) {
+  const normalized = new URL(inputUrl.toString());
+  normalized.hash = "";
+  if (kind === "html") {
+    for (const key of [...normalized.searchParams.keys()]) {
+      if (TRACKING_QUERY_RE.test(key)) normalized.searchParams.delete(key);
+    }
+  }
+  return normalized;
 }
 
 function classifyCacheKind(target) {
@@ -617,9 +701,13 @@ function canStoreResponse(response, cachePlan) {
   return { store: true, reason: "" };
 }
 
-function withCacheStatus(response, status, method, reason) {
+function withCacheStatus(response, status, method, reason, storeStatus = "") {
   const headers = new Headers(response.headers);
   headers.set(EDGEFLOW_CACHE_HEADER, status);
+  headers.set(EDGEFLOW_CACHE_CLASS_HEADER, normalizeCacheClass(reason, response));
+  headers.set(EDGEFLOW_CONTENT_CLASS_HEADER, classifyContent(response));
+  if (storeStatus) headers.set(EDGEFLOW_CACHE_STORE_HEADER, storeStatus);
+  else headers.delete(EDGEFLOW_CACHE_STORE_HEADER);
   if (reason) headers.set(EDGEFLOW_CACHE_REASON_HEADER, reason);
   else headers.delete(EDGEFLOW_CACHE_REASON_HEADER);
   return new Response(method === "HEAD" ? null : response.body, {
@@ -627,6 +715,25 @@ function withCacheStatus(response, status, method, reason) {
     statusText: response.statusText,
     headers
   });
+}
+
+function normalizeCacheClass(reason, response) {
+  if (reason === "html" || reason === "snapshot" || String(reason).startsWith("snapshot-")) return "html";
+  if (reason === "static" || reason === "fingerprinted-static") return reason;
+  const contentClass = classifyContent(response);
+  return contentClass === "html" ? "html" : "bypass";
+}
+
+function classifyContent(response) {
+  const type = (response.headers.get("content-type") || "").toLowerCase();
+  if (type.includes("text/html") || type.includes("application/xhtml+xml")) return "html";
+  if (type.includes("text/css")) return "css";
+  if (type.includes("javascript") || type.includes("ecmascript")) return "js";
+  if (type.startsWith("font/") || /(?:woff|truetype|opentype)/.test(type)) return "font";
+  if (type.startsWith("image/")) return "image";
+  if (type.startsWith("video/") || type.startsWith("audio/")) return "media";
+  if (type.includes("pdf") || type.includes("xml") || type.includes("json") || type.startsWith("text/")) return "document";
+  return "other";
 }
 
 function withSnapshotStatus(response, status, ageSeconds, refresh, storeType = "") {
@@ -740,12 +847,6 @@ async function rewriteResponse(originResp, requestUrl, method, target, cfg) {
   setCachingHeaders(headers, isStatic, target, cfg);
   setSecurityHeaders(headers);
 
-  // [v2.0] 对 HTML 响应添加 Vary: EO-Client-IPCountry
-  // 提示边缘缓存按地区区分，不同地区的用户获得不同的缓存版本
-  if (isHtml) {
-    headers.append("vary", "EO-Client-IPCountry, X-EdgeOne-Client-Country");
-  }
-
   if (!shouldRewriteBodyText || method === "HEAD") {
     normalizeTransferHeaders(headers);
     headers.set("x-proxy-cache-policy", isStatic ? "static" : "dynamic");
@@ -778,7 +879,6 @@ async function rewriteResponse(originResp, requestUrl, method, target, cfg) {
   headers.delete("content-length");
   headers.delete("content-encoding");
   headers.delete("vary");
-  headers.set("vary", "Accept, EO-Client-IPCountry");
   headers.set("x-proxy-cache-policy", isStatic ? "static" : "dynamic");
   headers.set("x-proxy-upstream", target.upstreamHost);
 
@@ -850,7 +950,6 @@ function normalizeTransferHeaders(headers) {
   headers.delete("content-length");
   headers.set("content-encoding", "identity");
   headers.delete("vary");
-  headers.set("vary", "Accept");
 }
 
 function setCachingHeaders(headers, isStatic, target, cfg) {
