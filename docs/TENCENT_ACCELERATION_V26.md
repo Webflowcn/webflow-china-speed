@@ -64,4 +64,12 @@ Repeated CSS, JavaScript, TTF, and JPG checks all had increasing positive `Age` 
 
 The corrected Sitemap exposes four EO-host URLs. Automatic prefetch was unavailable under the current quota, so the homepage, `/styles`, `/contact`, `/contact-copy`, and sampled first-screen assets were warmed through ordinary requests. Second requests to the four HTML routes returned in 54-63 ms with positive `Age`.
 
-FeedSpring still returns 403 in every browser run and remains a separate third-party compatibility issue. Multi-city node testing is not yet complete; these figures represent this Mac's mainland-China direct route only.
+FeedSpring still returns 403 in every browser run and remains a separate third-party compatibility issue. The browser-vitals table represents this Mac's mainland-China direct route; the following network-level check adds four mainland cities.
+
+### Four-city cold versus warm check
+
+Globalping used the same probes in Beijing, Shanghai, Guangzhou, and Chengdu for the repeat round. The first cold EO fill had 1977-2287 ms TTFB and was not faster than the current baseline's 1854-2275 ms. On the second request from the same probes, EO TTFB fell to 13-30 ms while the baseline remained 888-2062 ms. Warm medians were 19.5 ms for EO versus 1664.5 ms for the baseline; total-time medians were 160 ms versus 1707 ms.
+
+Measurements: EO cold `2KSRpZ8CWpjcN9Hcm000210N5`, EO repeat `2cfpkRfEIZsEd7JmD000210N6`, baseline cold `2psLcwRXmhyPv7AOT000210N5`, baseline repeat `2wJ0Aw8rlo74HnV7T000210N6`.
+
+This confirms that the acceleration benefit depends on an EdgeOne object already existing near the visitor. A previously cold POP can still pay the Makers/Webflow origin cost. Because automatic prefetch is unavailable on the current quota, keeping key routes warm through ordinary traffic or a permitted scheduler is the main remaining performance gap.

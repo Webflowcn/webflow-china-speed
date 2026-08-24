@@ -43,6 +43,7 @@
  - 2026-08-24 每轮新建匿名 Chrome 的 5 次本机中国大陆直连对比：正式基准 TTFB/FCP/LCP/load 中位数为 1072.5/3148/3820/6069.7ms；EO 为 22.1/208/208/802.2ms，分别改善 97.9%/93.4%/94.6%/86.8%
  - EO 抽样 CSS/JS/TTF/JPG 第二轮后 `Age > 0`，4 类资源边缘命中率 100%，重复耗时 19-59ms；内层 `X-EdgeFlow-Cache: MISS` 是被外层缓存保留的首次回源诊断头
  - 当前套餐默认预热接口对单 URL 也返回 `LimitExceeded.BatchQuota`，未升级；已用普通访问暖起 4 个 Sitemap HTML 路径及首屏抽样资源
+ - 北京/上海/广州/成都同探针复测：EO 首次冷节点 TTFB 1977-2287ms，未优于正式基准 1854-2275ms；第二次 EO 为 13-30ms（中位数 19.5ms），正式基准仍为 888-2062ms（中位数 1664.5ms）。EO 的收益依赖边缘已有对象，冷 POP 首次回源仍是剩余短板
  - v2.5 已在独立项目 `tectura-cn-v24-preview` 的 Production 部署 `dpoo6d8pzd4f` 验证：首次 HTML 为 `MISS + blob`，随后为 `HIT + FRESH + blob`
  - 该预览项目 `IsTld=0` 且未绑定自定义域名，必须使用 EdgeOne 访问门禁；测试工具仅注入 `eo_token` / `eo_time`，不能把此口径冒充公开域名的完全匿名测试
  - 冷浏览器三轮（每轮清 Cookie/本地缓存、不发送 `no-cache`）HTML TTFB 约 169–335ms，均命中 Blob；但 14 个代理静态资源每轮仍全部 MISS，当前主要瓶颈已转为字体、图片、Webflow JS/CSS 的持久边缘缓存

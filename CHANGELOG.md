@@ -14,6 +14,7 @@
 - **routing**: EO 通过受信密钥安全复用 staging Makers 回源，直连 staging 保持独立 PUBLIC_HOST；放弃路由异常的独立 EO-origin 项目
 - **fix**: Sitemap `<loc>` 统一改写为实际外部域名，并补齐 AVIF/OTF 静态资源分类
 - **verified**: 本机大陆直连、每轮新建匿名 Chrome 的 5 次中位数为 TTFB 22.1ms、FCP/LCP 208ms、load 802.2ms；抽样静态资源第二轮后 EO 命中率 100%
+- **verified**: 北京/上海/广州/成都同探针第二次访问 EO TTFB 为 13-30ms，正式基准为 888-2062ms；首次冷节点回源仍约 2 秒
 - **limit**: 当前套餐不支持 QUIC/HTTP/3 和自定义 Cache Key；未购买或升级，追踪参数只在 Makers 内层归一化
 - **limit**: 当前默认预热额度对单 URL 也返回 `LimitExceeded.BatchQuota`；未升级，改用普通请求暖站
 
