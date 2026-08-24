@@ -271,6 +271,8 @@ test("health response is minimal and contains no request or runtime dump", async
     "originConfigured",
     "publicHostConfigured",
     "runtime",
+    "siteAccelerationOverrideActive",
+    "siteAccelerationOverrideConfigured",
     "snapshotStoreAvailable",
     "snapshotStoreType",
     "version"
@@ -281,6 +283,8 @@ test("health response is minimal and contains no request or runtime dump", async
   assert.equal(body.cacheApiAvailable, true);
   assert.equal(body.snapshotStoreAvailable, false);
   assert.equal(body.snapshotStoreType, null);
+  assert.equal(body.siteAccelerationOverrideConfigured, false);
+  assert.equal(body.siteAccelerationOverrideActive, false);
   assert.equal(response.headers.get("x-edgeflow-cache"), "BYPASS");
 });
 
@@ -298,6 +302,78 @@ test("PUBLIC_HOST controls rewritten HTML, canonical URLs, and redirects", async
   assert.match(body, /https:\/\/public\.example\.com\/about/);
   assert.match(body, /https:\/\/public\.example\.com\/contact/);
   assert.doesNotMatch(body, /makers-origin\.example|origin\.example\.com/);
+});
+
+test("trusted Site Acceleration secret selects the external host without reaching upstream", async () => {
+  let upstreamSecret = "not-observed";
+  globalThis.fetch = async (_url, init) => {
+    upstreamSecret = init.headers.get("x-edgeflow-site-secret");
+    return htmlResponse(`<!doctype html><html><head>
+      <link rel="canonical" href="https://origin.example.com/about">
+    </head><body><a href="https://origin.example.com/contact">Contact</a></body></html>`);
+  };
+  const env = {
+    WEBFLOW_HOST: "origin.example.com",
+    PUBLIC_HOST: "staging.example.com",
+    SITE_ACCELERATION_PUBLIC_HOST: "eo.example.com",
+    SITE_ACCELERATION_SECRET: "edge-only-secret"
+  };
+  const response = await handleProxyRequest(
+    new Request("https://staging.example.com/about", {
+      headers: { "x-edgeflow-site-secret": "edge-only-secret" }
+    }),
+    env,
+    createContext()
+  );
+  const body = await response.text();
+  assert.match(body, /https:\/\/eo\.example\.com\/about/);
+  assert.match(body, /https:\/\/eo\.example\.com\/contact/);
+  assert.doesNotMatch(body, /staging\.example\.com|origin\.example\.com|edge-only-secret/);
+  assert.equal(upstreamSecret, null);
+});
+
+test("missing or incorrect Site Acceleration secret preserves the staging public host", async () => {
+  globalThis.fetch = async () => htmlResponse(
+    '<html><body><a href="https://origin.example.com/contact">Contact</a></body></html>'
+  );
+  const env = {
+    WEBFLOW_HOST: "origin.example.com",
+    PUBLIC_HOST: "staging.example.com",
+    SITE_ACCELERATION_PUBLIC_HOST: "eo.example.com",
+    SITE_ACCELERATION_SECRET: "edge-only-secret"
+  };
+  for (const providedSecret of [null, "wrong-secret"]) {
+    const headers = providedSecret ? { "x-edgeflow-site-secret": providedSecret } : {};
+    const response = await handleProxyRequest(
+      new Request("https://staging.example.com/about", { headers }),
+      env,
+      createContext()
+    );
+    const body = await response.text();
+    assert.match(body, /https:\/\/staging\.example\.com\/contact/);
+    assert.doesNotMatch(body, /eo\.example\.com|edge-only-secret/);
+  }
+});
+
+test("health reports Site Acceleration state without exposing its secret", async () => {
+  const env = {
+    WEBFLOW_HOST: "origin.example.com",
+    PUBLIC_HOST: "staging.example.com",
+    SITE_ACCELERATION_PUBLIC_HOST: "eo.example.com",
+    SITE_ACCELERATION_SECRET: "edge-only-secret"
+  };
+  const response = await handleProxyRequest(
+    new Request("https://staging.example.com/__proxy/health", {
+      headers: { "x-edgeflow-site-secret": "edge-only-secret" }
+    }),
+    env,
+    createContext()
+  );
+  const text = await response.text();
+  const body = JSON.parse(text);
+  assert.equal(body.siteAccelerationOverrideConfigured, true);
+  assert.equal(body.siteAccelerationOverrideActive, true);
+  assert.equal(text.includes("edge-only-secret"), false);
 });
 
 test("Accept differences share one cache key and rewritten output has no unnecessary Vary", async () => {
@@ -563,6 +639,43 @@ test("fingerprinted assets get a long immutable edge TTL", async () => {
   assert.equal(response.headers.get("x-edgeflow-cache"), "MISS");
   assert.match(response.headers.get("cache-control"), /s-maxage=2592000/);
   assert.match(response.headers.get("cache-control"), /immutable/);
+});
+
+test("AVIF and OTF assets are classified as static resources", async () => {
+  globalThis.fetch = async (url) => new Response("asset", {
+    headers: { "content-type": String(url).endsWith(".avif") ? "image/avif" : "font/otf" }
+  });
+  for (const path of ["hero.avif", "display.otf"]) {
+    const response = await handleProxyRequest(
+      new Request(`https://proxy.example.com/__eo_asset_v3__/cdn.prod.website-files.com/site/${path}`),
+      { WEBFLOW_HOST: "origin.example.com" },
+      createContext()
+    );
+    assert.equal(response.headers.get("x-edgeflow-cache-class"), "static");
+  }
+});
+
+test("proxied origin sitemap locations use the effective public host", async () => {
+  globalThis.fetch = async () => new Response(`<?xml version="1.0"?><urlset>
+    <url><loc>https://www.origin-custom.example/</loc></url>
+    <url><loc>https://www.origin-custom.example/about?lang=en</loc></url>
+  </urlset>`, { headers: { "content-type": "application/xml" } });
+  const response = await handleProxyRequest(
+    new Request("https://makers.example/sitemap.xml", {
+      headers: { "x-edgeflow-site-secret": "edge-only-secret" }
+    }),
+    {
+      WEBFLOW_HOST: "origin.example.com",
+      PUBLIC_HOST: "staging.example.com",
+      SITE_ACCELERATION_PUBLIC_HOST: "eo.example.com",
+      SITE_ACCELERATION_SECRET: "edge-only-secret"
+    },
+    createContext()
+  );
+  const body = await response.text();
+  assert.match(body, /<loc>https:\/\/eo\.example\.com<\/loc>/);
+  assert.match(body, /<loc>https:\/\/eo\.example\.com\/about\?lang=en<\/loc>/);
+  assert.doesNotMatch(body, /origin-custom|staging\.example/);
 });
 
 test("rewritten responses reset stale upstream cache metadata and expose safe timing", async () => {

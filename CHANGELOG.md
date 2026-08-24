@@ -5,12 +5,17 @@
 ### 腾讯云 Site Acceleration 测试候选
 
 - **feat**: 增加 `PUBLIC_HOST`，确保经 Site Acceleration 回源后的 HTML、Canonical、资源和跳转使用外部域名
+- **security**: 支持 EdgeOne 注入密钥后按请求切换 `SITE_ACCELERATION_PUBLIC_HOST`；密钥不转发源站、不写入响应，也不影响 staging 直连对照
 - **observability**: Cache API 写入明确输出 `STORE_OK / STORE_FAILED`，并增加缓存分类和内容分类响应头
 - **cache**: 移除不改变响应内容的 `Accept` 缓存键及 `Vary`，HTML tracking 查询参数归一化，功能性查询继续 BYPASS
 - **prewarm**: 受鉴权刷新接口默认读取源站 Sitemap，最多预热 20 个 HTML 页面
 - **audit**: 增加静态资源连续请求审计，并将 FeedSpring 403 单列
 - **infra**: 创建 custom/staging/EO 三条隔离测试线路；Site Acceleration 已下发 30 天静态缓存、1 天浏览器缓存、80% 预刷新、Brotli/Gzip、HTTP/2 和 HTTPS
+- **routing**: EO 通过受信密钥安全复用 staging Makers 回源，直连 staging 保持独立 PUBLIC_HOST；放弃路由异常的独立 EO-origin 项目
+- **fix**: Sitemap `<loc>` 统一改写为实际外部域名，并补齐 AVIF/OTF 静态资源分类
+- **verified**: 本机大陆直连、每轮新建匿名 Chrome 的 5 次中位数为 TTFB 22.1ms、FCP/LCP 208ms、load 802.2ms；抽样静态资源第二轮后 EO 命中率 100%
 - **limit**: 当前套餐不支持 QUIC/HTTP/3 和自定义 Cache Key；未购买或升级，追踪参数只在 Makers 内层归一化
+- **limit**: 当前默认预热额度对单 URL 也返回 `LimitExceeded.BatchQuota`；未升级，改用普通请求暖站
 
 ## [v2.5.0] — 2026-08-24
 

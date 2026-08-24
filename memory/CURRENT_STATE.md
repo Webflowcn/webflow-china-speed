@@ -1,7 +1,7 @@
  # Current State
 
  **版本**: main 为 v2.4.0（提交 `00f9cd2`）；功能分支为 v2.6.0 腾讯云加速候选版
- **状态**: v2.5 Blob 基线已备份；v2.6 三条隔离线路及 Site Acceleration 已部署，正在完成 Makers 自定义域名 TLS 与匿名性能验收；正式项目仍运行 v2.3.1，KV 等待审核
+ **状态**: v2.5 Blob 基线已备份；v2.6 custom/staging 对照与 Site Acceleration 已部署并通过本机中国大陆直连验收；正式项目仍运行 v2.3.1，KV 等待审核
  **最后更新**: 2026-08-24
  
  ## 已完成的里程碑
@@ -15,7 +15,7 @@
  - [x] v2.4: KV HTML 持久快照、后台刷新、最后成功版本回退和主动刷新端点
  - [x] v2.5（候选）: 可选 Blob 备用快照、KV 优先级、esbuild 依赖打包、门禁 Cookie 隔离和后端诊断头
  - [x] v2.6（候选）: `PUBLIC_HOST`、Cache API 写入结果、资源分类、Sitemap 批量预热和静态资源重复审计
- - [x] v2.6 腾讯云测试架构: custom/staging/EO 三条隔离线路、独立 EO 回源项目、DNSPod CNAME、免费证书和可审计缓存规则
+ - [x] v2.6 腾讯云测试架构: custom/staging/EO 三条隔离线路、DNSPod CNAME、免费证书和可审计缓存规则；EO 安全复用 staging Makers 回源
  - [x] 匿名浏览器审计: 多轮清空 Cookie/本地缓存，并分别支持直连、指定代理和硬刷新口径
  
  ## 当前覆盖的优化项
@@ -40,6 +40,9 @@
  - 当前 `tectura-cn.webflowcn.com` 线上仍为 v2.3.1；v2.4 只在独立预览项目运行，KV 尚未绑定
  - v2.6 冷回源抽样中 Webflow staging 源站约 1.276 秒，正式自定义源站约 3.677 秒；热 Blob HTML 中位数仍约 0.40–0.46 秒，尚未达到 300ms 验收线
  - 现有 Site Acceleration 套餐拒绝 QUIC/HTTP/3 与自定义 Cache Key；已保留 HTTP/2，不升级套餐。静态边缘缓存规则可用，追踪参数在 EO 外层可能产生重复缓存对象
+ - 2026-08-24 每轮新建匿名 Chrome 的 5 次本机中国大陆直连对比：正式基准 TTFB/FCP/LCP/load 中位数为 1072.5/3148/3820/6069.7ms；EO 为 22.1/208/208/802.2ms，分别改善 97.9%/93.4%/94.6%/86.8%
+ - EO 抽样 CSS/JS/TTF/JPG 第二轮后 `Age > 0`，4 类资源边缘命中率 100%，重复耗时 19-59ms；内层 `X-EdgeFlow-Cache: MISS` 是被外层缓存保留的首次回源诊断头
+ - 当前套餐默认预热接口对单 URL 也返回 `LimitExceeded.BatchQuota`，未升级；已用普通访问暖起 4 个 Sitemap HTML 路径及首屏抽样资源
  - v2.5 已在独立项目 `tectura-cn-v24-preview` 的 Production 部署 `dpoo6d8pzd4f` 验证：首次 HTML 为 `MISS + blob`，随后为 `HIT + FRESH + blob`
  - 该预览项目 `IsTld=0` 且未绑定自定义域名，必须使用 EdgeOne 访问门禁；测试工具仅注入 `eo_token` / `eo_time`，不能把此口径冒充公开域名的完全匿名测试
  - 冷浏览器三轮（每轮清 Cookie/本地缓存、不发送 `no-cache`）HTML TTFB 约 169–335ms，均命中 Blob；但 14 个代理静态资源每轮仍全部 MISS，当前主要瓶颈已转为字体、图片、Webflow JS/CSS 的持久边缘缓存

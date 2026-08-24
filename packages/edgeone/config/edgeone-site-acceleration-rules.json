@@ -5,7 +5,7 @@
       "RuleName": "tectura-v26-eo-base",
       "Status": "enable",
       "Description": [
-        "v2.6 test: compression, HTTP2, HTTPS, and origin-controlled safe caching"
+        "v2.6 test: compression, HTTP2, HTTPS, origin caching, and authenticated Makers override"
       ],
       "Branches": [
         {
@@ -41,6 +41,18 @@
               "ForceRedirectHTTPSParameters": {
                 "Switch": "on",
                 "RedirectStatusCode": 301
+              }
+            },
+            {
+              "Name": "ModifyRequestHeader",
+              "ModifyRequestHeaderParameters": {
+                "HeaderActions": [
+                  {
+                    "Action": "set",
+                    "Name": "X-EdgeFlow-Site-Secret",
+                    "Value": "${SITE_ACCELERATION_SECRET}"
+                  }
+                ]
               }
             }
           ]

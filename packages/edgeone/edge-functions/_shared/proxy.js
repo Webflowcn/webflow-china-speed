@@ -42,7 +42,7 @@ const HEAD_INJECT = [].join("");
 
 const BODY_INJECT = `<script>(function(){var r=function(){document.querySelectorAll('.w-webflow-badge,[class*="webflow-badge"]').forEach(function(n){n.remove()})};r();setTimeout(r,800);setTimeout(r,2500);document.querySelectorAll('img:not([loading])').forEach(function(i){i.loading='lazy';i.decoding='async'});}());</script>`;
 
-const STATIC_EXT_RE = /\.(?:js|mjs|css|png|jpg|jpeg|gif|webp|svg|ico|woff2|woff|ttf|map|json|xml|txt|pdf|mp4|webm|ogg|mp3)$/i;
+const STATIC_EXT_RE = /\.(?:js|mjs|css|png|jpg|jpeg|gif|webp|avif|svg|ico|woff2|woff|ttf|otf|map|json|xml|txt|pdf|mp4|webm|ogg|mp3)$/i;
 const FINGERPRINT_RE = /(?:^|[._/-])[a-f0-9]{8,}(?:[._/-]|$)/i;
 const EDGEFLOW_CACHE_HEADER = "x-edgeflow-cache";
 const EDGEFLOW_CACHE_REASON_HEADER = "x-edgeflow-cache-reason";
@@ -90,7 +90,7 @@ function getClientCountry(request, context = {}) {
 export async function handleProxyRequest(request, env = {}, context = {}) {
   const requestStartedAt = monotonicNow();
   const reqUrl = new URL(request.url);
-  const cfg = resolveSiteConfig(env);
+  const cfg = resolveRequestSiteConfig(request, env);
   const publicUrl = resolvePublicUrl(reqUrl, cfg);
 
   // ════════════════════════════════════════════════════════════
@@ -105,6 +105,11 @@ export async function handleProxyRequest(request, env = {}, context = {}) {
       version: "2.6.0",
       originConfigured: Boolean(cfg.originHost),
       publicHostConfigured: Boolean(cfg.publicHost),
+      siteAccelerationOverrideConfigured: Boolean(
+        normalizeHost(env.SITE_ACCELERATION_PUBLIC_HOST || "") &&
+        String(env.SITE_ACCELERATION_SECRET || "")
+      ),
+      siteAccelerationOverrideActive: Boolean(cfg.siteAccelerationOverride),
       cacheApiAvailable: Boolean(globalThis.caches && globalThis.caches.default),
       snapshotStoreAvailable: Boolean(snapshotBackend),
       snapshotStoreType: snapshotBackend?.type || null
@@ -338,6 +343,24 @@ function resolveSiteConfig(env) {
     snapshotTtl: parsePositiveInt(env.SNAPSHOT_TTL, 900),
     snapshotPaths: parseSnapshotPaths(env.SNAPSHOT_PATHS || "/")
   };
+}
+
+function resolveRequestSiteConfig(request, env) {
+  const cfg = resolveSiteConfig(env);
+  const publicHost = normalizeHost(env.SITE_ACCELERATION_PUBLIC_HOST || "");
+  const expectedSecret = String(env.SITE_ACCELERATION_SECRET || "");
+  const providedSecret = request.headers.get("x-edgeflow-site-secret") || "";
+  if (!publicHost || !expectedSecret || !constantTimeEqual(providedSecret, expectedSecret)) return cfg;
+  return { ...cfg, publicHost, siteAccelerationOverride: true };
+}
+
+function constantTimeEqual(left, right) {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  }
+  return difference === 0;
 }
 
 function resolvePublicUrl(reqUrl, cfg) {
@@ -787,6 +810,7 @@ function parsePositiveInt(value, fallback) {
 
 function buildUpstreamHeaders(request, reqUrl, upstreamHost) {
   const headers = new Headers(request.headers);
+  headers.delete("x-edgeflow-site-secret");
   const upstreamCookie = stripEdgeOneAccessCookies(headers.get("cookie"));
   if (upstreamCookie) headers.set("cookie", upstreamCookie);
   else headers.delete("cookie");
@@ -1166,7 +1190,7 @@ async function generateSitemap(cfg, reqUrl) {
     if (resp.ok) {
       const text = await resp.text();
       if (text.includes("<urlset") || text.includes("<sitemapindex")) {
-        return rewriteDomainTokens(text, reqUrl, cfg);
+        return rewriteSitemapLocations(rewriteDomainTokens(text, reqUrl, cfg), reqOrigin);
       }
     }
   } catch (_e) { /* origin has no sitemap, continue */ }
@@ -1181,6 +1205,18 @@ async function generateSitemap(cfg, reqUrl) {
 
   // Fallback: single-entry sitemap with homepage only
   return buildSitemapXml([{ loc: reqOrigin, lastmod: new Date().toISOString().slice(0, 10) }]);
+}
+
+function rewriteSitemapLocations(xml, reqOrigin) {
+  return xml.replace(/(<loc>\s*)(https?:\/\/[^<\s]+)(\s*<\/loc>)/gi, (_match, open, value, close) => {
+    try {
+      const source = new URL(value);
+      const rewritten = new URL(`${source.pathname}${source.search}${source.hash}`, `${reqOrigin}/`);
+      return `${open}${rewritten.toString().replace(/\/$/, source.pathname === "/" ? "" : "/")}${close}`;
+    } catch (_error) {
+      return `${open}${value}${close}`;
+    }
+  });
 }
 
 async function scrapeHomepageLinks(cfg, reqOrigin) {

@@ -151,7 +151,9 @@ npm run audit:live -- https://你的域名 --disable-browser-cache
  | 变量名 | 必填 | 说明 |
  |--------|------|------|
  | `WEBFLOW_HOST` | 可选 | 你的 Webflow 项目地址（默认 `webflowcn.webflow.io`）|
- | `PUBLIC_HOST` | 可选 | Site Acceleration 对外域名；HTML、Canonical、资源链接和跳转统一改写到该域名 |
+ | `PUBLIC_HOST` | 可选 | 当前 Makers 线路自身的公开域名；HTML、Canonical、资源链接和跳转统一改写到该域名 |
+ | `SITE_ACCELERATION_PUBLIC_HOST` | 可选 | 同一 Makers 项目作为 Site Acceleration 回源时使用的外部域名；仅在密钥验证通过后生效 |
+ | `SITE_ACCELERATION_SECRET` | 可选 | 由 EdgeOne 回源规则注入的随机密钥；只能放在控制台环境变量，不要提交到 Git |
  | `CACHE_TTL` | 可选 | HTML 显式缓存 TTL，默认 300 秒 |
  | `SNAPSHOT_TTL` | 可选 | KV/Blob HTML 快照新鲜期，默认 900 秒 |
  | `SNAPSHOT_BLOB_STORE` | 可选 | KV 不可用时启用 Blob 备用快照；建议值 `edgeflow-snapshots`，未设置则关闭 |
