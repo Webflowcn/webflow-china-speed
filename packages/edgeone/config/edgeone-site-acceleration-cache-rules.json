@@ -1,0 +1,117 @@
+{
+  "ZoneId": "zone-3p4cmw8cmpj0",
+  "Rules": [
+    {
+      "RuleName": "tectura-v26-eo-bypass-proxy",
+      "Status": "enable",
+      "Description": ["Never cache proxy control paths"],
+      "Branches": [{
+        "Condition": "${http.request.host} in ['tectura-v26-eo.webflowcn.com'] and ${http.request.uri.path} in ['/__proxy/*']",
+        "Actions": [
+          {"Name":"Cache","CacheParameters":{"NoCache":{"Switch":"on"}}},
+          {"Name":"MaxAge","MaxAgeParameters":{"FollowOrigin":"off","CacheTime":0}}
+        ]
+      }]
+    },
+    {
+      "RuleName": "tectura-v26-eo-bypass-api",
+      "Status": "enable",
+      "Description": ["Never cache APIs or forms"],
+      "Branches": [{
+        "Condition": "${http.request.host} in ['tectura-v26-eo.webflowcn.com'] and ${http.request.uri.path} in ['/api*']",
+        "Actions": [
+          {"Name":"Cache","CacheParameters":{"NoCache":{"Switch":"on"}}},
+          {"Name":"MaxAge","MaxAgeParameters":{"FollowOrigin":"off","CacheTime":0}}
+        ]
+      }]
+    },
+    {
+      "RuleName": "tectura-v26-eo-bypass-health",
+      "Status": "enable",
+      "Description": ["Never cache health and refresh controls"],
+      "Branches": [{
+        "Condition": "${http.request.host} in ['tectura-v26-eo.webflowcn.com'] and ${http.request.uri.path} in ['/__edgeflow/*']",
+        "Actions": [
+          {"Name":"Cache","CacheParameters":{"NoCache":{"Switch":"on"}}},
+          {"Name":"MaxAge","MaxAgeParameters":{"FollowOrigin":"off","CacheTime":0}}
+        ]
+      }]
+    },
+    {
+      "RuleName": "tectura-v26-eo-proxy-assets",
+      "Status": "enable",
+      "Description": [
+        "Cache rewritten proxy assets at EdgeOne for 30 days; browsers cache for one day"
+      ],
+      "Branches": [
+        {
+          "Condition": "${http.request.host} in ['tectura-v26-eo.webflowcn.com'] and ${http.request.uri.path} in ['/__eo_asset_v3__/*']",
+          "Actions": [
+            {
+              "Name": "Cache",
+              "CacheParameters": {
+                "CustomTime": {
+                  "Switch": "on",
+                  "IgnoreCacheControl": "on",
+                  "CacheTime": 2592000
+                }
+              }
+            },
+            {
+              "Name": "MaxAge",
+              "MaxAgeParameters": {
+                "FollowOrigin": "off",
+                "CacheTime": 86400
+              }
+            },
+            {
+              "Name": "CachePrefresh",
+              "CachePrefreshParameters": {
+                "Switch": "on",
+                "CacheTimePercent": 80
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "RuleName": "tectura-v26-eo-static-extensions",
+      "Status": "enable",
+      "Description": [
+        "Cache versioned fonts, images, CSS, and JavaScript at EdgeOne for 30 days"
+      ],
+      "Branches": [
+        {
+          "Condition": "${http.request.host} in ['tectura-v26-eo.webflowcn.com'] and ${http.request.file_extension} in ['css','js','mjs','woff','woff2','ttf','otf','png','jpg','jpeg','webp','avif','svg','gif','ico']",
+          "Actions": [
+            {
+              "Name": "Cache",
+              "CacheParameters": {
+                "CustomTime": {
+                  "Switch": "on",
+                  "IgnoreCacheControl": "on",
+                  "CacheTime": 2592000
+                }
+              }
+            },
+            {
+              "Name": "MaxAge",
+              "MaxAgeParameters": {
+                "FollowOrigin": "off",
+                "CacheTime": 86400
+              }
+            },
+            {
+              "Name": "CachePrefresh",
+              "CachePrefreshParameters": {
+                "Switch": "on",
+                "CacheTimePercent": 80
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

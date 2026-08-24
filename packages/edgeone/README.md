@@ -179,6 +179,8 @@ curl -X POST 'https://你的域名/__proxy/refresh' \
 npm run audit:resource -- 'https://你的域名/__eo_asset_v3__/...woff2' --runs=5
 ```
 
+腾讯云 v2.6 三线路测试的域名、Site Acceleration 规则、套餐限制和验收步骤见 [`docs/TENCENT_ACCELERATION_V26.md`](../../docs/TENCENT_ACCELERATION_V26.md)。`config/edgeone-site-acceleration-*.json` 是实际下发规则的可审计副本；规则只匹配测试域名，不能直接改成生产域名后盲目执行。
+
 ## 注意事项
 
 - 首次部署后，用海外代理访问确认是否触发了 301 重定向

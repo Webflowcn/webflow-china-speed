@@ -1,0 +1,51 @@
+{
+  "ZoneId": "zone-3p4cmw8cmpj0",
+  "Rules": [
+    {
+      "RuleName": "tectura-v26-eo-base",
+      "Status": "enable",
+      "Description": [
+        "v2.6 test: compression, HTTP2, HTTPS, and origin-controlled safe caching"
+      ],
+      "Branches": [
+        {
+          "Condition": "${http.request.host} in ['tectura-v26-eo.webflowcn.com']",
+          "Actions": [
+            {
+              "Name": "Cache",
+              "CacheParameters": {
+                "FollowOrigin": {
+                  "Switch": "on",
+                  "DefaultCache": "off"
+                }
+              }
+            },
+            {
+              "Name": "Compression",
+              "CompressionParameters": {
+                "Switch": "on",
+                "Algorithms": [
+                  "brotli",
+                  "gzip"
+                ]
+              }
+            },
+            {
+              "Name": "HTTP2",
+              "HTTP2Parameters": {
+                "Switch": "on"
+              }
+            },
+            {
+              "Name": "ForceRedirectHTTPS",
+              "ForceRedirectHTTPSParameters": {
+                "Switch": "on",
+                "RedirectStatusCode": 301
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

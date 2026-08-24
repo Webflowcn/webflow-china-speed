@@ -9,6 +9,8 @@
 - **cache**: 移除不改变响应内容的 `Accept` 缓存键及 `Vary`，HTML tracking 查询参数归一化，功能性查询继续 BYPASS
 - **prewarm**: 受鉴权刷新接口默认读取源站 Sitemap，最多预热 20 个 HTML 页面
 - **audit**: 增加静态资源连续请求审计，并将 FeedSpring 403 单列
+- **infra**: 创建 custom/staging/EO 三条隔离测试线路；Site Acceleration 已下发 30 天静态缓存、1 天浏览器缓存、80% 预刷新、Brotli/Gzip、HTTP/2 和 HTTPS
+- **limit**: 当前套餐不支持 QUIC/HTTP/3 和自定义 Cache Key；未购买或升级，追踪参数只在 Makers 内层归一化
 
 ## [v2.5.0] — 2026-08-24
 

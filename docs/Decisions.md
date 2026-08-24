@@ -84,6 +84,8 @@
 
 **结果**: 增加 `PUBLIC_HOST` 以支持 CDN 回源域名与外部域名分离；减少 `Accept/Vary` 变体；输出 Cache API 写入和内容分类诊断；通过受鉴权 Sitemap 预热接口准备 HTML，静态字体、图片、CSS、JS 则由 Site Acceleration 规则和预热功能承担。
 
+**实测套餐边界**: 现有套餐允许 30 天静态节点缓存、缓存预刷新、Brotli/Gzip、HTTP/2 和免费证书，但拒绝 QUIC/HTTP/3 与自定义 Cache Key。按“不购买/不升级”约束保留 HTTP/2；追踪参数仅在 Makers 内层归一化，EdgeOne 外层可能产生重复 HTML 缓存对象。
+
 
 ---
 
