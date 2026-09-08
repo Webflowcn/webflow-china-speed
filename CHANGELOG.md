@@ -1,8 +1,10 @@
 # Changelog
 
-## [Unreleased] — v2.6.0
+## [v2.6.0] — 2026-09-08
 
-### 腾讯云 Site Acceleration 测试候选
+### 腾讯云 Site Acceleration 支持
+
+本次将 v2.5/v2.6 候选代码发布至 main；CF Worker 路线未改动。以下网络性能数字来自 2026-08-24 历史测试，不代表本次重新验收或客户生产环境已经升级。2026-09-08 本地 39 项测试及构建通过。
 
 - **feat**: 增加 `PUBLIC_HOST`，确保经 Site Acceleration 回源后的 HTML、Canonical、资源和跳转使用外部域名
 - **security**: 支持 EdgeOne 注入密钥后按请求切换 `SITE_ACCELERATION_PUBLIC_HOST`；密钥不转发源站、不写入响应，也不影响 staging 直连对照

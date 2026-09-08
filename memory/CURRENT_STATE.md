@@ -1,8 +1,8 @@
  # Current State
 
- **版本**: main 为 v2.4.0（提交 `00f9cd2`）；功能分支为 v2.6.0 腾讯云加速候选版
- **状态**: v2.5 Blob 基线已备份；v2.6 custom/staging 对照与 Site Acceleration 已部署并通过本机中国大陆直连验收；正式项目仍运行 v2.3.1，KV 等待审核
- **最后更新**: 2026-08-24
+ **版本**: main 为 v2.6.0（2026-09-08 发布；来自 `feat/v2.6-tencent-acceleration` 的 `3324b71`，另补发布文档）
+ **状态**: v2.5/v2.6 代码已进入 main；39 项本地测试与构建通过。下方部署和网络性能记录为 2026-08-24 历史快照，本次未重新确认客户正式域名版本或 KV 审核状态。
+ **最后更新**: 2026-09-08
  
  ## 已完成的里程碑
  
@@ -13,8 +13,8 @@
  - [x] v2.3（本地）: 构建修复、显式缓存、安全健康检查、Link 头重写与自动化测试
  - [x] v2.3.1: Makers 原生缓存 schema、过期元数据、自愈与 `Server-Timing`
  - [x] v2.4: KV HTML 持久快照、后台刷新、最后成功版本回退和主动刷新端点
- - [x] v2.5（候选）: 可选 Blob 备用快照、KV 优先级、esbuild 依赖打包、门禁 Cookie 隔离和后端诊断头
- - [x] v2.6（候选）: `PUBLIC_HOST`、Cache API 写入结果、资源分类、Sitemap 批量预热和静态资源重复审计
+ - [x] v2.5（已纳入 main）: 可选 Blob 备用快照、KV 优先级、esbuild 依赖打包、门禁 Cookie 隔离和后端诊断头
+ - [x] v2.6（已纳入 main）: `PUBLIC_HOST`、Cache API 写入结果、资源分类、Sitemap 批量预热和静态资源重复审计
  - [x] v2.6 腾讯云测试架构: custom/staging/EO 三条隔离线路、DNSPod CNAME、免费证书和可审计缓存规则；EO 安全复用 staging Makers 回源
  - [x] 匿名浏览器审计: 多轮清空 Cookie/本地缓存，并分别支持直连、指定代理和硬刷新口径
  

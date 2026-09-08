@@ -73,3 +73,13 @@
 
 本仓库采用 **个人使用许可证**，仅供非商业性个人使用。详见 [LICENSE](LICENSE)。
 商业使用需取得作者授权。
+
+## 当前版本与分支
+
+main：**v2.6.0**（2026-09-08），本轮升级 EdgeOne 路线，包含 Blob 备用快照和 Site Acceleration 支持。配置模板中的测试域名需要按自己的站点调整。
+
+- [版本更新](CHANGELOG.md)
+- [本地与 GitHub 分支索引](docs/BRANCHES.md)
+- [腾讯云测试部署与已知限制](docs/TENCENT_ACCELERATION_V26.md)
+
+代码进入 main 不等于客户线上环境已完成升级；网络性能数字以测试时间、线路和缓存条件为准。
